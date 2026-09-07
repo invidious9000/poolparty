@@ -40,6 +40,7 @@ fn observation(status: CapacityStatus, at: Timestamp, until: Timestamp) -> Usage
         windows: vec![],
         balances: vec![],
         source: "synthetic".to_owned(),
+        provider_available: None,
     }
 }
 fn intent(session: &str, account: Option<&str>) -> CreateBinding {
@@ -1024,6 +1025,134 @@ async fn native_requests_remain_exclusive_before_drop_cleanup_and_with_mixed_ope
             admission(&binding, Some("explicit-second")),
             26,
         )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn credential_watermark_is_durable_idempotent_and_rejects_rollback() {
+    let fixture = Fixture::new(1).await;
+    let reference = CredentialRef {
+        id: CredentialId::new("unenrolled-credential").unwrap(),
+        generation: 7,
+    };
+    fixture
+        .ledger
+        .advance_credential_generation(&reference)
+        .await
+        .unwrap();
+    fixture
+        .ledger
+        .advance_credential_generation(&reference)
+        .await
+        .unwrap();
+    let newer = CredentialRef {
+        generation: 8,
+        ..reference.clone()
+    };
+    fixture
+        .ledger
+        .advance_credential_generation(&newer)
+        .await
+        .unwrap();
+    drop(fixture.ledger);
+    let reopened = SqliteLedger::open(&fixture.path).unwrap();
+    assert_eq!(
+        reopened
+            .advance_credential_generation(&reference)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidInput
+    );
+    reopened
+        .advance_credential_generation(&newer)
+        .await
+        .unwrap();
+    // Numeric comparison must cover the entire u64 domain, rather than SQLite's
+    // signed integer range or lexicographic ordering of the stored decimal text.
+    let maximum = CredentialRef {
+        generation: u64::MAX,
+        ..reference
+    };
+    reopened
+        .advance_credential_generation(&maximum)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .advance_credential_generation(&newer)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidInput
+    );
+}
+
+#[tokio::test]
+async fn account_upserts_and_admission_honor_maintenance_watermarks() {
+    let fixture = Fixture::new(1).await;
+    let binding = fixture.bind("session-a").await;
+    let mut newer = account("account-a", "owner-a");
+    newer.credential.generation = 3;
+    fixture
+        .ledger
+        .advance_credential_generation(&newer.credential)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .ledger
+            .put_account(account("account-a", "owner-a"))
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidInput
+    );
+    assert_eq!(
+        fixture
+            .ledger
+            .admit(&fixture.principal, admission(&binding, None), 20)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::CredentialUnavailable
+    );
+    fixture.ledger.put_account(newer).await.unwrap();
+    let prepared = fixture
+        .ledger
+        .admit(&fixture.principal, admission(&binding, None), 20)
+        .await
+        .unwrap();
+    assert_eq!(prepared.attempt.credential.generation, 3);
+    assert_eq!(prepared.binding, binding);
+}
+
+#[tokio::test]
+async fn existing_credential_metadata_fences_upgrades_before_watermark_population() {
+    let fixture = Fixture::new(1).await;
+    // Simulate an existing ledger from before this additive table was introduced.
+    let connection = rusqlite::Connection::open(&fixture.path).unwrap();
+    connection
+        .execute("DELETE FROM credential_watermarks", [])
+        .unwrap();
+    drop(connection);
+    let previous = account("account-a", "owner-a").credential;
+    let rollback = CredentialRef {
+        generation: 0,
+        ..previous.clone()
+    };
+    let reopened = SqliteLedger::open(&fixture.path).unwrap();
+    assert_eq!(
+        reopened
+            .advance_credential_generation(&rollback)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidInput
+    );
+    reopened
+        .advance_credential_generation(&previous)
         .await
         .unwrap();
 }

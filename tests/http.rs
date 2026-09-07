@@ -160,6 +160,7 @@ impl Fixture {
                 windows: vec![],
                 balances: vec![],
                 source: "synthetic".into(),
+                provider_available: None,
             })
             .await
             .unwrap();
@@ -422,6 +423,7 @@ async fn exhausted_resume_keeps_binding_and_protocol_error_shape() {
                 windows: vec![],
                 balances: vec![],
                 source: "synthetic".into(),
+                provider_available: None,
             })
             .await
             .unwrap();

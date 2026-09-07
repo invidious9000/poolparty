@@ -7,6 +7,8 @@ use std::{fmt, pin::Pin};
 
 #[async_trait]
 pub trait Ledger: Send + Sync {
+    /// Persist a monotonic credential generation before external credential operations.
+    async fn advance_credential_generation(&self, reference: &CredentialRef) -> Result<()>;
     async fn put_account(&self, account: Account) -> Result<()>;
     async fn put_quota_policy(&self, policy: QuotaPolicy) -> Result<()>;
     /// Older observations never replace newer evidence, including auth/quota failures.
@@ -64,6 +66,17 @@ pub trait CredentialStore: Send + Sync {
     async fn load(&self, reference: &CredentialRef) -> Result<SecretValue>;
     /// Compare the complete expected generation; never overwrite a newer bundle.
     async fn replace(&self, expected: &CredentialRef, next: SecretValue) -> Result<CredentialRef>;
+}
+
+#[async_trait]
+pub trait VersionedCredentialStore: CredentialStore {
+    async fn latest(&self, id: &CredentialId) -> Result<(CredentialRef, SecretValue)>;
+}
+
+#[async_trait]
+pub trait CredentialRefresher: Send + Sync {
+    /// One exchange. Ambiguous issuance must never be retried automatically.
+    async fn refresh(&self, current: &SecretValue, now: Timestamp) -> Result<SecretValue>;
 }
 
 #[async_trait]

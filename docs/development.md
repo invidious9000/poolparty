@@ -1,9 +1,12 @@
 # Developing the core
 
-The current executable is a loopback-only synthetic demo. It exercises the real
-SQLite ledger, caller authentication, control API and stream lifecycle without
-contacting any provider. The HTTP provider transport is a library component tested
-against local origins; the executable does not load real provider credentials.
+The executable provides a loopback-only synthetic demo and separate one-shot
+credential maintenance modes. The demo exercises the real SQLite ledger, caller
+authentication, control API and stream lifecycle without contacting any provider.
+Explicit `--check`, `--probe` and `--refresh` modes can load operator-enrolled
+credentials and contact configured HTTPS endpoints. They do not start a production
+listener. See [credential maintenance](credential-maintenance.md) before using
+these modes; even `--check` can rotate an expiring Codex credential.
 
 ## Build and verify
 
@@ -69,6 +72,12 @@ Resume uses `GET /api/v1/sessions/{id}` and the same bound route.
 - Terminal SSE bytes carry completion evidence; the ledger settles before those
   bytes reach the caller. Partial EOF and disconnect preserve uncertain pressure.
 - Bounded bodies/SSE frames, redacted secret types and response-header allowlists.
+- Explicit 1Password field mappings and versioned writeback under one writer;
+  serialized Codex refresh with a durable pending fence and SQLite generation
+  watermark. An unresolved refresh requires manual reconciliation.
+- Bounded Codex/GLM usage and DeepSeek balance readers with exact decimal evidence,
+  finite freshness and explicit unsupported collection for Kimi. Auxiliary feature
+  exhaustion does not become account-wide generation exhaustion.
 
 Without operation IDs, only one active inference may use a binding. An active
 native attempt also blocks a new identified operation on that binding. Distinct
@@ -79,14 +88,39 @@ retry configuration/conformance remains a gate, not an exactly-once guarantee.
 
 ## Remaining acceptance gates
 
-Production credential persistence/refresh, quota collectors, supported-client
-live conformance, OIDC and workload grant lifecycle, model-specific limits, PAYG
-spend reservations, usage-driven selection scoring, explicit reconciliation/admin
-recovery, backup/restore tooling and graceful-drain deadlines remain incomplete.
+Persistent production listener wiring, automatic refresh/collection scheduling,
+supported-client live conformance, Kimi account-usage collection, OIDC and workload
+grant lifecycle, model-specific limits, PAYG spend reservations, usage-driven
+selection scoring, explicit reconciliation/admin recovery, backup/restore tooling
+and graceful-drain deadlines remain incomplete.
 Uncertain work deliberately retains capacity; the initial HTTP surface offers
-inspection but no operator override to release it without evidence.
+inspection but no operator override to release it without evidence. Maintenance
+pending markers likewise remain fenced after restart; a newer vault generation
+alone does not clear them.
 
 WebSockets, compaction, remote continuation/file references, helper-model changes,
 remote model discovery and nonstreaming inference return unsupported. No dashboard,
 production deployment or consumer integration is included. Cerebras/OpenRouter
 and MiniMax remain future options.
+
+## Current validation evidence
+
+The credential/usage slice passes 91 synthetic tests, formatting, workspace check,
+clippy with warnings denied, and the process restart smoke test. Automated tests
+never contact providers or a real vault.
+
+An explicit operator run separately verified installed 1Password CLI reads,
+Codex/GLM usage collection and one completed GLM Messages stream. A Codex token
+exchange reached the vault; a server-owned editor-metadata comparison caused the
+initial writeback result to fail closed. The comparison now allows that audit
+field to change, with synthetic regression coverage and an installed-CLI dry run.
+The stored bundle was manually reconciled against enrollment and a successful
+usage read; no second refresh exchange was issued. This does not establish an
+uninterrupted live refresh success path with the corrected adapter.
+
+Codex inference conformance remains open: one older-model request was explicitly
+rejected, and a separate current-model request returned HTTP 200 but no accepted
+stream bytes. Its attempt remains uncertain with capacity retained. Neither was
+automatically replayed. Private diagnostics and operator state remain outside this
+repository. This bounded validation is not full native-client, refresh crash,
+backup recovery or production deployment acceptance.

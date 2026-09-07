@@ -131,6 +131,10 @@ pub struct UsageWindow {
     pub used: Option<u64>,
     pub limit: Option<u64>,
     pub resets_at: Option<Timestamp>,
+    #[serde(default)]
+    pub used_percent: Option<String>,
+    #[serde(default)]
+    pub window_seconds: Option<u64>,
 }
 
 /// Decimal text preserves provider currency amounts without floating-point rounding.
@@ -138,6 +142,8 @@ pub struct UsageWindow {
 pub struct Money {
     pub currency: String,
     pub decimal: String,
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +155,8 @@ pub struct UsageObservation {
     pub windows: Vec<UsageWindow>,
     pub balances: Vec<Money>,
     pub source: String,
+    #[serde(default)]
+    pub provider_available: Option<bool>,
 }
 
 /// Constructed by an authenticator. Never deserialized from a request body.

@@ -1,4 +1,4 @@
-//! Loopback-only synthetic executable; production provider configuration is not enabled.
+//! Synthetic listener and explicit one-shot credential, usage and inference checks.
 use poolparty::{
     config::{StateDirectory, seed_demo},
     domain::*,
@@ -20,16 +20,22 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--check" | "--probe" | "--refresh")
+    ) {
+        return run_live(&args).await;
+    }
     if args.is_empty() || args == ["--help"] {
         println!(
-            "Usage: poolpartyd --demo\nLoopback-only synthetic router. No provider calls.\nRequired: POOLPARTY_DEMO_TOKEN (at least 32 characters)\nOptional: POOLPARTY_STATE_DIR (default ./state), POOLPARTY_LISTEN (default 127.0.0.1:8080)"
+            "Usage: poolpartyd --demo\n       poolpartyd --check CONFIG.json\n       poolpartyd --probe CONFIG.json\n       poolpartyd --refresh CONFIG.json CREDENTIAL_ID\nDemo: loopback-only, no provider calls; requires POOLPARTY_DEMO_TOKEN.\nChecks: explicit one-shot real credential/usage operations; require POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN.\nProbe: sends the configured synthetic request once per eligible account.\nRefresh: explicitly rotate one enrolled Codex credential."
         );
         return Ok(());
     }
     if args != ["--demo"] {
         return Err(Error::new(
             ErrorCode::InvalidInput,
-            "Only --demo is implemented.",
+            "Unsupported command; use --help for available modes.",
         ));
     }
     let token = std::env::var("POOLPARTY_DEMO_TOKEN").map_err(|_| {
@@ -87,4 +93,71 @@ async fn run() -> Result<()> {
                 "HTTP server stopped unexpectedly.",
             )
         })
+}
+
+async fn run_live(args: &[String]) -> Result<()> {
+    use poolparty::live::{LiveConfig, LiveMode};
+    let valid =
+        (args[0] == "--refresh" && args.len() == 3) || (args[0] != "--refresh" && args.len() == 2);
+    if !valid {
+        return Err(Error::new(
+            ErrorCode::InvalidInput,
+            "Expected CONFIG.json and, for --refresh, a credential ID.",
+        ));
+    }
+    let path = std::path::Path::new(&args[1]);
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| Error::new(ErrorCode::InvalidInput, "Cannot read operator config."))?;
+    if metadata.len() > 1024 * 1024 {
+        return Err(Error::new(
+            ErrorCode::InvalidInput,
+            "Operator config exceeds size limit.",
+        ));
+    }
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|_| Error::new(ErrorCode::InvalidInput, "Cannot read operator config."))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(Error::new(
+            ErrorCode::InvalidInput,
+            "Operator config exceeds size limit.",
+        ));
+    }
+    let config: LiveConfig = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::new(ErrorCode::InvalidInput, "Operator config is invalid."))?;
+    let token = std::env::var("POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN").map_err(|_| {
+        Error::new(
+            ErrorCode::InvalidInput,
+            "Set POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN for explicit vault operations.",
+        )
+    })?;
+    let mode = match args[0].as_str() {
+        "--probe" => LiveMode::Probe,
+        "--refresh" => LiveMode::Refresh(
+            CredentialId::new(&args[2])
+                .map_err(|_| Error::new(ErrorCode::InvalidInput, "Invalid credential ID."))?,
+        ),
+        _ => LiveMode::Check,
+    };
+    let report = poolparty::live::run(config, SecretValue::new(token), mode).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|_| Error::new(ErrorCode::InvalidInput, "Cannot encode check report."))?
+    );
+    if report.accounts.iter().any(|a| {
+        a.credential_error.is_some()
+            || a.capacity == Some(CapacityStatus::ReauthenticationRequired)
+            || a.collection_error.is_some()
+            || a.probe
+                .as_ref()
+                .is_some_and(|p| p.error.is_some() || p.state != Some(AttemptState::Succeeded))
+    }) {
+        return Err(Error::new(
+            ErrorCode::UpstreamUnavailable,
+            "One or more account checks did not pass; inspect the redacted report.",
+        ));
+    }
+    Ok(())
 }

@@ -23,7 +23,8 @@ workspaces, tool execution, conversations, and recovery decisions.
 
 ## Proposed defaults
 
-These choices are the initial design recommendation, not implemented behavior.
+The runtime and SQLite choices underpin the experimental core. The remaining
+deployment, UI and control-client choices are proposals.
 
 | Area | Proposal | Reason |
 | --- | --- | --- |
@@ -61,7 +62,14 @@ synthetic transport and configured HTTP/SSE transport foundations. A loopback-on
 Pinned tooling, a lockfile, synthetic acceptance tests and a process restart smoke
 check are included. See [development](docs/development.md) for commands and limits.
 
-Production credential/usage adapters, live conformance, complete PAYG accounting,
+Explicit one-shot maintenance commands integrate a 1Password CLI credential store,
+serialized Codex refresh with durable pending fences and SQLite generation
+watermarks, bounded Codex/GLM/DeepSeek usage readers and optional inference probes.
+They do not provide a persistent production listener or periodic refresh/usage
+scheduler. See [credential maintenance](docs/credential-maintenance.md) for
+configuration, mutations, failure handling and remaining limits.
+
+Live provider conformance, Kimi account-usage collection, complete PAYG accounting,
 OIDC/workload identity lifecycle, dashboard and deployment remain separate gates.
 No existing consumer has changed. Module boundaries are recorded in
 [core implementation](design/core-implementation.md).

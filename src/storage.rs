@@ -70,6 +70,9 @@ impl SqliteLedger {
                  id TEXT PRIMARY KEY, owner TEXT NOT NULL, product TEXT NOT NULL,
                  generation TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS credential_watermarks (
+                 id TEXT PRIMARY KEY, generation TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS bindings (
                  id TEXT PRIMARY KEY, principal TEXT NOT NULL, session TEXT NOT NULL,
                  account TEXT NOT NULL REFERENCES accounts(id), data TEXT NOT NULL,
@@ -115,6 +118,39 @@ fn authorized_binding(db: &Connection, principal: &Principal, id: &BindingId) ->
         return Err(Error::new(ErrorCode::NotFound, "binding not found"));
     }
     Ok(binding)
+}
+
+fn credential_floor(db: &Connection, id: &CredentialId) -> Result<Option<u64>> {
+    // Include existing metadata so databases created before watermarks were added
+    // already have a floor before the first maintenance operation after upgrade.
+    let mut statement = db.prepare(
+        "SELECT generation FROM credential_watermarks WHERE id=?1 UNION ALL SELECT generation FROM credentials WHERE id=?1",
+    ).map_err(|_| unavailable())?;
+    let generations = statement
+        .query_map([id.as_str()], |row| row.get::<_, String>(0))
+        .map_err(|_| unavailable())?;
+    let mut floor = None;
+    for generation in generations {
+        let generation = generation
+            .map_err(|_| unavailable())?
+            .parse::<u64>()
+            .map_err(|_| unavailable())?;
+        floor = Some(floor.map_or(generation, |previous: u64| previous.max(generation)));
+    }
+    Ok(floor)
+}
+
+fn advance_credential(db: &Connection, reference: &CredentialRef) -> Result<()> {
+    if credential_floor(db, &reference.id)?
+        .is_some_and(|generation| reference.generation < generation)
+    {
+        return Err(invalid("credential generation cannot decrease"));
+    }
+    db.execute(
+        "INSERT INTO credential_watermarks(id,generation) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET generation=excluded.generation",
+        params![reference.id.as_str(), reference.generation.to_string()],
+    ).map_err(|_| unavailable())?;
+    Ok(())
 }
 
 fn eligible(
@@ -234,6 +270,18 @@ fn advance(
 
 #[async_trait]
 impl Ledger for SqliteLedger {
+    async fn advance_credential_generation(&self, reference: &CredentialRef) -> Result<()> {
+        let reference = reference.clone();
+        self.run(move |db| {
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| unavailable())?;
+            advance_credential(&tx, &reference)?;
+            tx.commit().map_err(|_| unavailable())
+        })
+        .await
+    }
+
     async fn put_account(&self, account: Account) -> Result<()> {
         self.run(move |db| {
             if account.models.is_empty() || account.models.iter().any(|model| model.trim().is_empty()) {
@@ -257,6 +305,7 @@ impl Ledger for SqliteLedger {
                     return Err(invalid("credential generation cannot decrease"));
                 }
             }
+            advance_credential(&tx, &account.credential)?;
             tx.execute("INSERT INTO credentials(id, owner, product, generation) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET generation=excluded.generation",
                 params![account.credential.id.as_str(), account.quota_owner.as_str(), product, account.credential.generation.to_string()]).map_err(|_| unavailable())?;
             tx.execute("INSERT INTO accounts(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
@@ -467,8 +516,7 @@ impl Ledger for SqliteLedger {
             }
             let account: Account = get(&tx, "SELECT data FROM accounts WHERE id=?1", [binding.account.as_str()])?.ok_or_else(unavailable)?;
             eligible(&tx, &account, &binding.intent, now).map_err(|error| error.bound(&binding.id))?;
-            let current_generation: String = tx.query_row("SELECT generation FROM credentials WHERE id=?1", [account.credential.id.as_str()], |row| row.get(0)).map_err(|_| unavailable())?;
-            if account.credential.generation != current_generation.parse::<u64>().map_err(|_| unavailable())? {
+            if credential_floor(&tx, &account.credential.id)? != Some(account.credential.generation) {
                 return Err(Error::new(ErrorCode::CredentialUnavailable, "account credential reference is stale").bound(&binding.id));
             }
             let attempt = Attempt {

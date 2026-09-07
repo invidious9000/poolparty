@@ -69,6 +69,7 @@ async fn fixture() -> Fixture {
             windows: vec![],
             balances: vec![],
             source: "fixture".into(),
+            provider_available: None,
         })
         .await
         .unwrap();

@@ -22,7 +22,17 @@ modules adopt them.
   principals and pool authorization; bodies cannot supply a trusted principal.
 - `providers.rs`: one-attempt HTTP/SSE adapters and synthetic transport. Endpoint
   and credential configuration comes from trusted operator configuration.
-- `config.rs`, `main.rs`: local synthetic demo wiring and exclusive startup.
+- `usage.rs`: bounded, read-only provider observations with explicit unknown and
+  scoped evidence; balance visibility does not implement spending admission.
+- `onepassword.rs`: stable field mappings, item-version generations and checked
+  writeback under exclusive writer ownership. The CLI has no conditional write.
+- `codex_auth.rs`: bounded auth-bundle parsing and one-attempt OAuth exchange;
+  decoded JWT claims support consistency/expiry checks, not authentication.
+- `maintenance.rs`: credential refresh ownership, durable pending fences, identity
+  checks and persistent generation watermarks through the ledger.
+- `live.rs`: explicit one-shot inventory checks, refresh and configured probes.
+- `config.rs`, `main.rs`: exclusive startup, synthetic demo and maintenance mode
+  selection. A persistent production listener remains a later integration gate.
 
 The application method is `Router::execute(&self, principal: &Principal,
 binding: BindingId, operation: Option<OperationId>, protocol: Protocol,
@@ -65,6 +75,29 @@ HTTP/SSE only. Unsupported compaction, WebSockets, remote continuation reference
 model-discovery and helper-model changes fail explicitly until their ownership and
 compatibility gates are implemented. Full request bodies remain transient; only a
 hash is retained for operation conflict detection. Streaming buffers are bounded.
+
+## Credential maintenance boundary
+
+The operator explicitly maps credentials and account identities. Item titles never
+select accounts. Accounts sharing a credential must agree on product, upstream
+identity and quota owner; accounts sharing a quota owner must agree on local
+admission policy. The selected state directory has one exclusive process owner.
+
+Codex refresh owns a per-credential lock across load, refresh and writeback. The
+ledger records the highest observed generation durably and rejects older ones.
+A pending marker is durably written before the external refresh call. Updated
+credentials must pass identity checks, vault writeback/readback and watermark
+advancement before the marker is removed. Any unresolved pending marker fences
+later use, including after restart and even when a newer bundle exists. Manual
+reconciliation/re-enrollment tooling is not implemented; there is no automatic
+marker-clear operation. See [maintenance](../docs/credential-maintenance.md).
+
+Usage collectors preserve exact percentage and currency text, window duration and
+reset timestamps, absent fields and finite freshness. Codex auxiliary feature
+buckets and GLM tool windows do not independently exhaust generation capacity.
+Unmodeled Codex model restrictions remain unknown. A funded DeepSeek wallet does
+not prove spend authorization or concurrency headroom. Kimi collection returns
+unsupported until its account-usage contract is qualified.
 
 ## Verification and delegation
 

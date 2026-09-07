@@ -171,6 +171,7 @@ pub async fn seed_demo(
                 windows: Vec::new(),
                 balances: Vec::new(),
                 source: "synthetic-demo".into(),
+                provider_available: None,
             })
             .await?;
         secrets.push((
