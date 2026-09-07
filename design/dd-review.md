@@ -11,7 +11,9 @@ by a concrete compatibility test. Its current Rust library exposes a stdio runti
 not a typed transport API suitable for direct embedding.
 
 The first account products are Codex subscriptions, Kimi/GLM coding plans and
-DeepSeek PAYG. MiniMax is a named future option. Kimi/GLM metered products and
+DeepSeek PAYG. MiniMax is a named future option. Cerebras and OpenRouter PAYG are
+future proxy/routing options; their adapters and live probes are outside initial
+scope. Kimi/GLM metered products and
 implicit paid overflow for a bound session remain excluded. Preserve native
 Responses and Messages protocols; actual Anthropic integration remains excluded.
 

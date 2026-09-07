@@ -13,6 +13,8 @@ PAYG never provides implicit overflow for an existing subscription-bound session
 | GLM / Z.AI | Anthropic Messages; Chat Completions when a consumer requires it | Published coding-plan protocol endpoints; retain endpoint/product distinction |
 | DeepSeek PAYG | Anthropic Messages initially; other native protocols separately validated | [Balance, concurrency and prior integration DD](../research/deepseek.md) |
 | MiniMax | Future option, Anthropic Messages | Retain research; not a first-release integration gate |
+| Cerebras PAYG | Future proxy/routing option; out of initial scope | Protocol, model, usage and spending-policy validation deferred |
+| OpenRouter PAYG | Future proxy/routing option; out of initial scope | Protocol, model, underlying-provider affinity and spending-policy validation deferred |
 | Actual Anthropic | Excluded | No Claude subscription OAuth, Fable quota logic, or Claude monitoring probes |
 
 The public vendor evidence supports compatible interfaces, not identical feature
@@ -26,6 +28,16 @@ capability requests just because the JSON shape is accepted.
 Store protocol, upstream provider, account product/plan, and concrete model as
 different dimensions. A Messages client calling MiniMax is not an Anthropic
 account. No universal model-name alias or effort mapping is assumed.
+
+Cerebras and OpenRouter may eventually be explicitly selected proxy destinations
+or fallback candidates. Their adapters and live probes are not initial delivery
+gates. Future fallback policy must declare eligible destinations, capability and
+spending constraints, and dispatch certainty. It may select a destination before
+a new session binds; an exhausted bound session still returns an error so its
+caller can choose to wait or start a new session. No automatic migration of a
+bound session or replay after an ambiguous dispatch is authorized. For an
+aggregating provider, define whether affinity includes the underlying inference
+provider before enabling that route.
 
 ## Credential ownership
 

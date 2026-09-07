@@ -9,7 +9,8 @@ workspaces, tool execution, conversations, and recovery decisions.
 
 - Separate public repository, independent of any one consumer or private estate.
 - Target Codex subscriptions, Kimi/GLM coding plans, and DeepSeek PAYG.
-  MiniMax is a named future adapter option.
+  MiniMax is a named future adapter option. Cerebras and OpenRouter PAYG are
+  future proxy/routing options, outside initial implementation and live DD.
 - Keep subscription windows and PAYG balances/budgets distinct. DeepSeek is an
   explicitly selectable product, not automatic overflow for a bound subscription
   session. Kimi/GLM metered products remain separate future adapters.
