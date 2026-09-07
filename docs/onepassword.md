@@ -13,6 +13,20 @@ credentials and provider credentials. Output sizes and execution time are bounde
 subprocess errors produce sanitized errors. The executable path is trusted
 operator configuration, and must be absolute.
 
+Each subprocess receives a fresh owner-only temporary configuration directory
+through `--config`, including service-account calls. The adapter does not pass
+`HOME`, `XDG_CONFIG_HOME` or an inherited `OP_CONFIG_DIR` to the child. The directory
+is created beneath the daemon's temporary directory (normally `TMPDIR` on Unix)
+with mode 0700 and removed when the invocation returns or is cancelled. It can
+contain CLI-managed configuration metadata; credential payloads remain on the
+stdin/stdout channel. `--cache=false` disables the CLI's background caching daemon
+so it cannot retain this configuration directory after the invocation. Timeouts
+kill and reap the subprocess before cleanup; cancellation retains the subprocess's
+kill-on-drop behavior. Abrupt daemon termination can leave temporary files for
+the deployment's ephemeral-volume lifecycle to remove. The vendor documents
+[the configuration directory and cache flags](https://www.1password.dev/cli/reference)
+and [their environment-variable counterparts](https://www.1password.dev/cli/environment-variables).
+
 `replace` serializes access, reads and checks the expected item version, edits the
 complete item through stdin, and verifies both the edit result and a fresh read.
 It checks the next version, new value and preservation of other item content.

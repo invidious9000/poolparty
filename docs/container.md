@@ -80,11 +80,15 @@ mount must already allow UID/GID 10001 to create that child. The image does not
 start as root or recursively change ownership of mounted data.
 
 `/tmp` is writable even when the image root filesystem is read-only. The passwd
-entry and image `HOME` both identify the private temporary home. The 1Password
-adapter clears inherited environment settings before spawning `op`; its Linux
-service-account behavior must be included in runtime verification. Persistent
-provider credentials remain in the vault, while database watermarks and refresh
-fences remain on the durable state volume.
+entry and image `HOME` identify the private temporary home. The 1Password adapter
+clears inherited environment settings before spawning `op`, including `HOME`.
+It creates a fresh mode-0700 configuration directory under the daemon's `TMPDIR`,
+passes its path explicitly with `--config`, and disables the CLI cache with
+`--cache=false`. This is required even for service-account calls; a passwd home
+entry alone does not provide the CLI's configuration location under the cleared
+environment. See [CLI isolation and cleanup](onepassword.md). Persistent provider
+credentials remain in the vault, while database watermarks and refresh fences
+remain on the durable state volume.
 
 Supply `POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN` and the configured
 `POOLPARTY_GRANT_*` environment variables through runtime secret delivery.

@@ -130,6 +130,17 @@ impl OnePasswordStore {
         {
             return Err(failure());
         }
+        // op requires a config location even with service-account authentication.
+        // Never resolve it from the operator's HOME or enable a caching daemon
+        // that could outlive this invocation's private directory.
+        let mut config_builder = tempfile::Builder::new();
+        config_builder.prefix("poolparty-op-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            config_builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let config_dir = config_builder.tempdir().map_err(|_| failure())?;
         let mut command = Command::new(&self.executable);
         command
             .args([
@@ -142,6 +153,9 @@ impl OnePasswordStore {
                 "json",
                 "--reveal",
             ])
+            .arg("--config")
+            .arg(config_dir.path())
+            .arg("--cache=false")
             .env_clear()
             .env("OP_SERVICE_ACCOUNT_TOKEN", self.service_token.expose())
             .stdin(if edit.is_some() {

@@ -17,9 +17,19 @@ root = pathlib.Path(__file__).resolve().parent
 mode = (root / 'mode').read_text()
 args = sys.argv[1:]
 assert args[:2] in [['item', 'get'], ['item', 'edit']]
-assert args[2:] == ['item-a', '--vault', 'vault-a', '--format', 'json', '--reveal']
+assert args[2:8] == ['item-a', '--vault', 'vault-a', '--format', 'json', '--reveal']
+assert len(args) == 11 and args[8] == '--config' and args[10] == '--cache=false'
+config = pathlib.Path(args[9])
+assert config.is_absolute() and config.is_dir()
+assert config.stat().st_mode & 0o777 == 0o700
+assert config.stat().st_uid == os.getuid()
+assert not list(config.iterdir())
+with (root / 'config-paths').open('a') as log:
+    log.write(str(config) + '\n')
+(config / 'synthetic-cli-state').write_text('synthetic configuration metadata')
 assert os.environ.get('OP_SERVICE_ACCOUNT_TOKEN') == 'synthetic-service-token'
 assert {key for key in os.environ if key.startswith('OP_')} == {'OP_SERVICE_ACCOUNT_TOKEN'}
+assert 'HOME' not in os.environ and 'XDG_CONFIG_HOME' not in os.environ
 assert not any(key.lower().endswith('proxy') for key in os.environ)
 with (root / 'calls').open('a') as log:
     log.write(args[1] + '\n')
@@ -64,6 +74,20 @@ if args[1] == 'edit':
         disturbed['fields'][1]['value'] = 'external-edit'
         (root / 'item.json').write_text(json.dumps(disturbed))
 print(json.dumps(item))
+"#;
+
+// exec keeps the recorded PID attached to the child the store must reap.
+const SLEEPING_MOCK: &str = r#"#!/bin/sh
+root=${0%/*}
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = --config ]; then
+        shift
+        printf '%s\n' "$1" > "$root/config-paths"
+    fi
+    shift
+done
+printf '%s' "$$" > "$root/pid"
+exec /bin/sleep 30
 "#;
 
 struct Fixture {
@@ -127,6 +151,21 @@ impl Fixture {
     fn calls(&self) -> String {
         std::fs::read_to_string(self.path.join("calls")).unwrap_or_default()
     }
+    fn assert_configs_removed(&self, count: usize) {
+        let paths = std::fs::read_to_string(self.path.join("config-paths")).unwrap();
+        let paths: Vec<_> = paths.lines().collect();
+        assert_eq!(paths.len(), count);
+        assert_eq!(
+            paths
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            count
+        );
+        for path in paths {
+            assert!(!std::path::Path::new(path).exists());
+        }
+    }
     fn update(&self, item: &Value) {
         std::fs::write(
             self.path.join("item.json"),
@@ -156,6 +195,7 @@ async fn reads_exact_generation_and_rotates_through_stdin_with_full_readback() {
         fixture.store.load(&next).await.unwrap().expose(),
         "synthetic-new-credential"
     );
+    fixture.assert_configs_removed(5);
     let submitted: Value =
         serde_json::from_slice(&std::fs::read(fixture.path.join("submitted.json")).unwrap())
             .unwrap();
@@ -285,6 +325,7 @@ async fn subprocess_failures_and_malformed_outputs_do_not_expose_secret_text() {
             assert!(!displayed.contains(secret));
         }
         assert_eq!(error.code, ErrorCode::CredentialUnavailable);
+        fixture.assert_configs_removed(1);
     }
 }
 
@@ -292,12 +333,7 @@ async fn subprocess_failures_and_malformed_outputs_do_not_expose_secret_text() {
 async fn timed_out_subprocess_is_killed_and_reaped() {
     let mut fixture = Fixture::new("timeout");
     // Avoid making Python interpreter startup part of the timeout assertion.
-    // exec keeps the recorded PID attached to the child the store must reap.
-    std::fs::write(
-        fixture.path.join("mock-op"),
-        "#!/bin/sh\nprintf '%s' \"$$\" > \"${0%/*}/pid\"\nexec /bin/sleep 30\n",
-    )
-    .unwrap();
+    std::fs::write(fixture.path.join("mock-op"), SLEEPING_MOCK).unwrap();
     fixture.store = fixture.store.with_timeout(Duration::from_secs(3)).unwrap();
     let started = std::time::Instant::now();
     assert_eq!(
@@ -305,6 +341,7 @@ async fn timed_out_subprocess_is_killed_and_reaped() {
         ErrorCode::CredentialUnavailable
     );
     assert!(started.elapsed() < Duration::from_secs(8));
+    fixture.assert_configs_removed(1);
     let pid = std::fs::read_to_string(fixture.path.join("pid")).unwrap();
     // kill -0 only inspects the synthetic process, after the store reaped it.
     let alive = std::process::Command::new("/bin/kill")
@@ -314,6 +351,44 @@ async fn timed_out_subprocess_is_killed_and_reaped() {
         .status()
         .unwrap();
     assert!(!alive.success());
+}
+
+#[tokio::test]
+async fn cancelled_read_kills_child_and_removes_private_config() {
+    let fixture = Fixture::new("timeout");
+    std::fs::write(fixture.path.join("mock-op"), SLEEPING_MOCK).unwrap();
+    let reference = expected(7);
+    let mut operation = Box::pin(fixture.store.load(&reference));
+    tokio::select! {
+        result = &mut operation => panic!("synthetic child finished before cancellation: {result:?}"),
+        _ = async {
+            while std::fs::read_to_string(fixture.path.join("pid"))
+                .ok()
+                .is_none_or(|pid| pid.trim().is_empty())
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        } => {}
+    }
+    drop(operation);
+    fixture.assert_configs_removed(1);
+    let pid = std::fs::read_to_string(fixture.path.join("pid")).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let alive = std::process::Command::new("/bin/kill")
+                .args(["-0", pid.trim()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            if !alive.success() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled synthetic child must be killed and reaped");
 }
 
 #[tokio::test]

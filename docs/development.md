@@ -121,7 +121,7 @@ Container builds and deployed ingress checks are separate from the local test su
 
 ## Current validation evidence
 
-The current slice passes 115 Rust tests, seven Python fixture tests, formatting,
+The current slice passes 116 Rust tests, seven Python fixture tests, formatting,
 workspace check/build, clippy with warnings denied and the synthetic process
 restart smoke check. These automated fixtures use isolated state and synthetic
 origins; they do not contact real providers or a vault.
