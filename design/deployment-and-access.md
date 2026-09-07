@@ -29,6 +29,13 @@ Build/verification infrastructure has its own lifecycle; replacing the runtime
 stack should not destroy the build plane. The overlay consumes a verified commit
 and image digest. It does not maintain a fork of the public application source.
 
+Reuse shared platform capabilities for observability and portal discovery. The
+[platform integration contract](platform-integration.md) covers structured pod
+logs, OTLP metrics/traces, declarative Grafana provisioning, Homepage ingress
+annotations, and the platform-owned network admission required for a new namespace.
+Adding an application namespace in the overlay alone may not grant access to
+existing protected services; coordinate that change with the platform owner.
+
 ## Network topology
 
 ```mermaid

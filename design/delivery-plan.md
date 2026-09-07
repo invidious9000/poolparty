@@ -53,11 +53,19 @@ request correlation, readiness, graceful drain, backup/restore, and credential
 enrollment/rotation paths. Keep provider usage reads bounded and distinguish
 request totals from quota observations.
 
+Implement the [shared platform contract](platform-integration.md): structured
+stdout logs for the existing collector, OTLP metrics/traces, bounded exporter
+failure behavior, and portable Grafana dashboards once metrics are stable.
+
 ## 5. Package, deploy, and integrate consumers separately
 
 Publish a reproducible container and portable deployment contract. In the separate
 private overlay, create the workload, storage, service, ingress, auth registrations,
 and secret mappings. Verify immutable image provenance and preview before activation.
+Arrange the platform-owned namespace/network admission, register the canonical UI
+Ingress through Homepage annotations, and provision dashboards/alerts through the
+existing platform inventory. Verify log, metric, and trace ingestion and portal
+discovery, not just the presence of application resources.
 Test normal workstation HTTPS access and internal service access, including negative
 authorization and streaming tests. Integration changes belong in each consumer's
 own repository after the service contract is proven.

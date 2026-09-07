@@ -27,6 +27,7 @@ These choices are the initial design recommendation, not implemented behavior.
 | State | SQLite WAL on persistent storage, one active daemon | Durable bindings and atomic admission without an initial distributed coordinator |
 | Control client | Thin Rust `poolparty` CLI; curl examples first | Stable JSON output and shared API contracts without policy in shell scripts |
 | Hosting | Container, Kubernetes Service, authenticated HTTPS ingress | Internal service discovery plus ordinary remote debugging |
+| Platform integration | Existing LGTM and Homepage, through standard telemetry and ingress metadata | Reuse shared observability and portal discovery |
 | Upstream reuse | Reference codex-lb; evaluate its Rust egress library selectively | Keep one allocation authority and Poolparty's stricter session contract |
 
 Revisit storage before introducing multiple active replicas. Do not run multiple
@@ -38,6 +39,7 @@ independent allocators against the same accounts and call that shared admission.
 - [Allocation, sessions, protocols, and errors](design/contracts.md)
 - [Providers and usage](design/providers-and-usage.md)
 - [Deployment and authentication](design/deployment-and-access.md)
+- [Shared observability and portal integration](design/platform-integration.md)
 - [Consumer integration and CLI](design/consumers-and-cli.md)
 - [Delivery sequence and unresolved decisions](design/delivery-plan.md)
 - [Reference assessment](research/codex-lb.md)

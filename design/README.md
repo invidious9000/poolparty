@@ -10,8 +10,10 @@ Read in this order:
 2. [Contracts](contracts.md): allocation, hard session binding, protocol behavior.
 3. [Providers and usage](providers-and-usage.md): account adapters and quota model.
 4. [Deployment and access](deployment-and-access.md): services, ingress, auth.
-5. [Consumers and CLI](consumers-and-cli.md): integration shapes and diagnostics.
-6. [Delivery plan](delivery-plan.md): acceptance cases and unresolved choices.
+5. [Shared platform integration](platform-integration.md): LGTM telemetry,
+   Homepage annotations, dashboard provisioning, and network admission.
+6. [Consumers and CLI](consumers-and-cli.md): integration shapes and diagnostics.
+7. [Delivery plan](delivery-plan.md): acceptance cases and unresolved choices.
 
 [codex-lb assessment](../research/codex-lb.md) records the reference revision and
 reuse recommendation. Public examples are synthetic. Estate-specific configuration
