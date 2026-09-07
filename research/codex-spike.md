@@ -308,6 +308,12 @@ strict WebSocket can become viable after the protection is demonstrated.
 
 ## Exact next checks
 
+These checks describe the carrier spike's remaining scope. The later
+[native HTTP vertical check](../docs/native-codex.md) qualifies ordinary tool
+turns and same-thread resume across daemon restart and credential rotation.
+It does not establish the child/fork, WebSocket, compaction or crash/restore
+contracts below.
+
 1. Confirm account products, pooling authorization/enrollment authority, stable
    quota owner, and any published per-model concurrent-request limits.
 2. Prove refresh rotation with one authority, including crash-after-refresh and

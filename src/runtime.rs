@@ -29,6 +29,8 @@ pub struct Router {
     transport: Arc<dyn Transport>,
     credentials: Arc<dyn CredentialStore>,
     clock: Arc<dyn Clock>,
+    preparation: Option<Arc<dyn RequestPreparation>>,
+    ownership: Option<Arc<dyn Send + Sync>>,
 }
 
 pub struct RoutedResponse {
@@ -50,7 +52,19 @@ impl Router {
             transport,
             credentials,
             clock,
+            preparation: None,
+            ownership: None,
         }
+    }
+
+    pub fn with_preparation(mut self, preparation: Arc<dyn RequestPreparation>) -> Self {
+        self.preparation = Some(preparation);
+        self
+    }
+
+    pub fn with_ownership(mut self, ownership: Arc<dyn Send + Sync>) -> Self {
+        self.ownership = Some(ownership);
+        self
     }
 
     pub fn ledger(&self) -> &Arc<dyn Ledger> {
@@ -114,6 +128,22 @@ impl Router {
             )
             .bound(&binding_id));
         }
+        if binding.closed_at.is_some() {
+            return Err(Error::new(ErrorCode::Closed, "Binding is closed.").bound(&binding_id));
+        }
+        if binding.intent.model != model || binding.intent.effort != effort {
+            return Err(Error::new(
+                ErrorCode::IntentConflict,
+                "Request conflicts with bound intent.",
+            )
+            .bound(&binding_id));
+        }
+        if let Some(preparation) = &self.preparation {
+            preparation
+                .prepare(&binding)
+                .await
+                .map_err(|error| error.bound(&binding_id))?;
+        }
         let prepared = self
             .ledger
             .admit(
@@ -130,6 +160,7 @@ impl Router {
             .await?;
         let id = prepared.attempt.id.clone();
         let mut guard = AttemptGuard::new(self.ledger.clone(), self.clock.clone(), id.clone());
+        guard.ownership = self.ownership.clone();
         let secret = match self.credentials.load(&prepared.attempt.credential).await {
             Ok(value) => value,
             Err(_) => {
@@ -318,6 +349,7 @@ struct AttemptGuard {
     id: AttemptId,
     on_drop: Settlement,
     armed: bool,
+    ownership: Option<Arc<dyn Send + Sync>>,
 }
 impl AttemptGuard {
     fn new(ledger: Arc<dyn Ledger>, clock: Arc<dyn Clock>, id: AttemptId) -> Self {
@@ -327,6 +359,7 @@ impl AttemptGuard {
             id,
             on_drop: Settlement::NotDispatched,
             armed: true,
+            ownership: None,
         }
     }
     async fn finish(&mut self, outcome: Settlement) -> Result<()> {
@@ -346,7 +379,9 @@ impl Drop for AttemptGuard {
             let id = self.id.clone();
             let now = self.clock.now();
             let outcome = self.on_drop;
+            let ownership = self.ownership.clone();
             handle.spawn(async move {
+                let _ownership = ownership;
                 let _ = ledger.settle(&id, outcome, now).await;
             });
         }

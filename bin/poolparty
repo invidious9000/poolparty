@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Small JSON control client. Caller grants come from the environment, never argv."""
+import argparse
+import http.client
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+class ClientError(Exception):
+    pass
+
+
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
+
+
+def identifier(value):
+    if re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value) is None:
+        raise argparse.ArgumentTypeError("IDs require 1..128 ASCII letters, digits, dash, underscore or dot")
+    return value
+
+
+def arguments():
+    parser = argparse.ArgumentParser(
+        description="Poolparty JSON control client; uses POOLPARTY_URL and POOLPARTY_GRANT."
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("accounts", help="List authorized accounts and usage observations")
+    session = commands.add_parser("session").add_subparsers(dest="action", required=True)
+    create = session.add_parser("create", help="Allocate an explicitly scoped session binding")
+    create.add_argument("--session", required=True, type=identifier)
+    create.add_argument("--pool", required=True, type=identifier)
+    create.add_argument("--product", required=True, choices=[
+        "codex_subscription", "kimi_coding", "glm_coding", "deepseek_payg"
+    ])
+    create.add_argument("--model", required=True)
+    create.add_argument("--account", type=identifier)
+    create.add_argument("--effort")
+    for action in ["inspect", "close"]:
+        session.add_parser(action).add_argument("binding", type=identifier)
+    attempt = commands.add_parser("attempt").add_subparsers(dest="action", required=True)
+    attempt.add_parser("inspect").add_argument("attempt", type=identifier)
+    return parser.parse_args()
+
+
+def route(args):
+    if args.command == "accounts":
+        return "GET", "/api/v1/accounts", None
+    if args.command == "attempt":
+        return "GET", "/api/v1/attempts/" + args.attempt, None
+    if args.action == "create":
+        body = {name: getattr(args, name) for name in [
+            "session", "pool", "product", "model", "account", "effort"
+        ] if getattr(args, name) is not None}
+        return "POST", "/api/v1/sessions", body
+    if args.action == "close":
+        return "POST", "/api/v1/sessions/" + args.binding + "/close", None
+    return "GET", "/api/v1/sessions/" + args.binding, None
+
+
+def request(method, path, body):
+    token = os.environ.get("POOLPARTY_GRANT", "")
+    if not token or not all(33 <= ord(char) <= 126 for char in token):
+        raise ClientError("Set POOLPARTY_GRANT to a caller bearer grant.")
+    base = os.environ.get("POOLPARTY_URL", "http://127.0.0.1:8080").rstrip("/")
+    try:
+        parsed = urllib.parse.urlsplit(base)
+        valid = parsed.scheme in ("http", "https") and parsed.hostname and parsed.port != 0
+        valid = valid and not (parsed.username or parsed.password or parsed.query or parsed.fragment)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ClientError("POOLPARTY_URL must be an HTTP(S) URL without credentials, query or fragment.")
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    outgoing = urllib.request.Request(base + path, data=data, method=method, headers={
+        "Authorization": "Bearer " + token,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    })
+    # Redirects must never carry the caller grant to another origin. Ambient
+    # proxy configuration must not choose another credential-bearing route.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirects())
+    try:
+        response = opener.open(outgoing, timeout=20)
+    except urllib.error.HTTPError as error:
+        response = error
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise ClientError("Cannot reach Poolparty; no retry was made.") from None
+    with response:
+        status = response.status
+        payload = response.read(1024 * 1024 + 1)
+    if len(payload) > 1024 * 1024:
+        raise ClientError("Poolparty response exceeds the 1 MiB limit.")
+    try:
+        result = json.loads(payload)
+    except (ValueError, UnicodeError):
+        raise ClientError("Poolparty returned a non-JSON response; no retry was made.") from None
+    print(json.dumps(result, indent=2, ensure_ascii=True))
+    return 0 if 200 <= status < 300 else 1
+
+
+def main():
+    args = arguments()
+    try:
+        return request(*route(args))
+    except (ClientError, TimeoutError, OSError, ValueError, http.client.HTTPException) as error:
+        # Low-level exceptions can contain URLs or request details. Only authored
+        # ClientError messages cross this diagnostic boundary.
+        message = str(error) if isinstance(error, ClientError) else "Poolparty response could not be read; no retry was made."
+        print("poolparty: " + message, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

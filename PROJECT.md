@@ -21,17 +21,18 @@ workspaces, tool execution, conversations, and recovery decisions.
 - Support both custom harnesses and native CLI-shaped consumers.
 - Keep private deployment and consumer details out of all public artifacts.
 
-## Proposed defaults
+## Technology and remaining defaults
 
-The runtime and SQLite choices underpin the experimental core. The remaining
-deployment, UI and control-client choices are proposals.
+The runtime and SQLite choices underpin the experimental daemon. Deployment, UI
+and a packaged Rust control client remain proposals; a Python standard-library
+control helper is implemented.
 
 | Area | Proposal | Reason |
 | --- | --- | --- |
 | Runtime | Rust, Tokio, Axum, reqwest/rustls | One long-lived asynchronous service with explicit stream ownership |
 | UI | TypeScript/React/Vite, compiled assets served by the daemon | Browser dashboard without a second production application server |
 | State | SQLite WAL on persistent storage, one active daemon | Durable bindings and atomic admission without an initial distributed coordinator |
-| Control client | Thin Rust `poolparty` CLI; curl examples first | Stable JSON output and shared API contracts without policy in shell scripts |
+| Control client | Python JSON helper now; packaged Rust CLI remains an option | Stable API commands with environment-based caller grants |
 | Hosting | Container, Kubernetes Service, authenticated HTTPS ingress | Internal service discovery plus ordinary remote debugging |
 | Platform integration | Existing LGTM and Homepage, through standard telemetry and ingress metadata | Reuse shared observability and portal discovery |
 | Upstream reuse | Reference codex-lb; evaluate its Rust egress library selectively | Keep one allocation authority and Poolparty's stricter session contract |
@@ -55,21 +56,25 @@ independent allocators against the same accounts and call that shared admission.
 
 ## Current implementation state
 
-The first Rust core exists: typed domain/adapter contracts, SQLite ledger,
-conservative admission and recovery, authenticated HTTP control/model routes,
-synthetic transport and configured HTTP/SSE transport foundations. A loopback-only
-`poolpartyd --demo` executable exercises the lifecycle without provider access.
-Pinned tooling, a lockfile, synthetic acceptance tests and a process restart smoke
-check are included. See [development](docs/development.md) for commands and limits.
+`poolpartyd --serve` runs the authenticated HTTP/SSE daemon with typed adapter
+contracts, durable SQLite bindings, conservative admission/recovery, managed
+inventory, periodic maintenance and checks before request admission. Caller grants
+are scoped to principals and pools. Account status exposes authorized usage and
+credential generations; the control helper supports account queries and session
+operations. See [daemon operations](docs/daemon.md).
 
-Explicit one-shot maintenance commands integrate a 1Password CLI credential store,
-serialized Codex refresh with durable pending fences and SQLite generation
-watermarks, bounded Codex/GLM/DeepSeek usage readers and optional inference probes.
-They do not provide a persistent production listener or periodic refresh/usage
-scheduler. See [credential maintenance](docs/credential-maintenance.md) for
-configuration, mutations, failure handling and remaining limits.
+The credential boundary integrates a 1Password CLI store, serialized Codex refresh
+with durable pending fences and generation watermarks, and bounded Codex/GLM/
+DeepSeek usage readers. One-shot checks, refreshes and explicit probes remain
+available. A loopback-only `--demo` exercises the same ledger and HTTP lifecycle
+without provider access. Pinned tooling and isolated fixtures are included.
 
-Live provider conformance, Kimi account-usage collection, complete PAYG accounting,
-OIDC/workload identity lifecycle, dashboard and deployment remain separate gates.
-No existing consumer has changed. Module boundaries are recorded in
-[core implementation](design/core-implementation.md).
+Native Codex HTTP start, tool execution and resume passed across daemon restart
+and credential rotation while retaining the original thread/account binding.
+This establishes the bounded native slice described in
+[validation evidence](docs/development.md), not complete native parity.
+
+WebSockets/compaction, Kimi account-usage collection, broader provider conformance,
+complete PAYG accounting, OIDC/workload identity lifecycle, reconciliation tooling,
+dashboard and deployment remain distinct gates. No existing consumer has changed.
+Module boundaries are recorded in [core implementation](design/core-implementation.md).

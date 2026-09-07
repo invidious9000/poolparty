@@ -7,6 +7,10 @@ use std::{fmt, pin::Pin};
 
 #[async_trait]
 pub trait Ledger: Send + Sync {
+    /// Return only authorized accounts and their visible pool memberships.
+    async fn accounts(&self, principal: &Principal) -> Result<Vec<Account>>;
+    async fn set_account_enabled(&self, id: &AccountId, enabled: bool) -> Result<()>;
+    async fn usage_observation(&self, owner: &QuotaOwnerId) -> Result<Option<UsageObservation>>;
     /// Persist a monotonic credential generation before external credential operations.
     async fn advance_credential_generation(&self, reference: &CredentialRef) -> Result<()>;
     async fn put_account(&self, account: Account) -> Result<()>;
@@ -43,6 +47,12 @@ pub trait Ledger: Send + Sync {
 
 pub trait Clock: Send + Sync {
     fn now(&self) -> Timestamp;
+}
+
+#[async_trait]
+pub trait RequestPreparation: Send + Sync {
+    /// Refresh account state before admission. Failure is always pre-dispatch.
+    async fn prepare(&self, binding: &Binding) -> Result<()>;
 }
 
 /// Deliberately lacks Serialize and exposes only a redacted Debug implementation.

@@ -1,4 +1,4 @@
-//! Synthetic listener and explicit one-shot credential, usage and inference checks.
+//! Persistent daemon, synthetic listener and explicit one-shot operator checks.
 use poolparty::{
     config::{StateDirectory, seed_demo},
     domain::*,
@@ -20,6 +20,16 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--serve") {
+        if args.len() != 2 {
+            return Err(Error::new(
+                ErrorCode::InvalidInput,
+                "Expected --serve CONFIG.json.",
+            ));
+        }
+        let config = read_operator_config(&args[1]).await?;
+        return poolparty::service::run(config, service_token()?).await;
+    }
     if matches!(
         args.first().map(String::as_str),
         Some("--check" | "--probe" | "--refresh")
@@ -28,7 +38,7 @@ async fn run() -> Result<()> {
     }
     if args.is_empty() || args == ["--help"] {
         println!(
-            "Usage: poolpartyd --demo\n       poolpartyd --check CONFIG.json\n       poolpartyd --probe CONFIG.json\n       poolpartyd --refresh CONFIG.json CREDENTIAL_ID\nDemo: loopback-only, no provider calls; requires POOLPARTY_DEMO_TOKEN.\nChecks: explicit one-shot real credential/usage operations; require POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN.\nProbe: sends the configured synthetic request once per eligible account.\nRefresh: explicitly rotate one enrolled Codex credential."
+            "Usage: poolpartyd --serve CONFIG.json\n       poolpartyd --demo\n       poolpartyd --check CONFIG.json\n       poolpartyd --probe CONFIG.json\n       poolpartyd --refresh CONFIG.json CREDENTIAL_ID\nServe: persistent authenticated provider router; requires scoped grant environment variables and POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN.\nDemo: loopback-only, no provider calls; requires POOLPARTY_DEMO_TOKEN.\nChecks: explicit one-shot real credential/usage operations; require POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN.\nProbe: sends the configured synthetic request once per eligible account.\nRefresh: explicitly rotate one enrolled Codex credential."
         );
         return Ok(());
     }
@@ -61,8 +71,8 @@ async fn run() -> Result<()> {
         ));
     }
     let state_path = std::env::var("POOLPARTY_STATE_DIR").unwrap_or_else(|_| "state".into());
-    let _state = StateDirectory::acquire(state_path)?;
-    let ledger = Arc::new(SqliteLedger::open(&_state.database)?);
+    let _state = Arc::new(StateDirectory::acquire(state_path)?);
+    let ledger = Arc::new(SqliteLedger::open(&_state.database)?.with_ownership(_state.clone()));
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     ledger.recover(clock.now()).await?;
     let (principal, credentials) = seed_demo(ledger.as_ref(), clock.now()).await?;
@@ -105,33 +115,8 @@ async fn run_live(args: &[String]) -> Result<()> {
             "Expected CONFIG.json and, for --refresh, a credential ID.",
         ));
     }
-    let path = std::path::Path::new(&args[1]);
-    let metadata = tokio::fs::metadata(path)
-        .await
-        .map_err(|_| Error::new(ErrorCode::InvalidInput, "Cannot read operator config."))?;
-    if metadata.len() > 1024 * 1024 {
-        return Err(Error::new(
-            ErrorCode::InvalidInput,
-            "Operator config exceeds size limit.",
-        ));
-    }
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|_| Error::new(ErrorCode::InvalidInput, "Cannot read operator config."))?;
-    if bytes.len() > 1024 * 1024 {
-        return Err(Error::new(
-            ErrorCode::InvalidInput,
-            "Operator config exceeds size limit.",
-        ));
-    }
-    let config: LiveConfig = serde_json::from_slice(&bytes)
-        .map_err(|_| Error::new(ErrorCode::InvalidInput, "Operator config is invalid."))?;
-    let token = std::env::var("POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN").map_err(|_| {
-        Error::new(
-            ErrorCode::InvalidInput,
-            "Set POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN for explicit vault operations.",
-        )
-    })?;
+    let config: LiveConfig = read_operator_config(&args[1]).await?;
+    let token = service_token()?;
     let mode = match args[0].as_str() {
         "--probe" => LiveMode::Probe,
         "--refresh" => LiveMode::Refresh(
@@ -140,7 +125,7 @@ async fn run_live(args: &[String]) -> Result<()> {
         ),
         _ => LiveMode::Check,
     };
-    let report = poolparty::live::run(config, SecretValue::new(token), mode).await?;
+    let report = poolparty::live::run(config, token, mode).await?;
     println!(
         "{}",
         serde_json::to_string_pretty(&report)
@@ -160,4 +145,35 @@ async fn run_live(args: &[String]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn service_token() -> Result<SecretValue> {
+    std::env::var("POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN")
+        .map(SecretValue::new)
+        .map_err(|_| {
+            Error::new(
+                ErrorCode::InvalidInput,
+                "Set POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN for explicit vault operations.",
+            )
+        })
+}
+
+async fn read_operator_config<T: serde::de::DeserializeOwned>(path: &str) -> Result<T> {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| Error::new(ErrorCode::InvalidInput, "Cannot read operator config."))?;
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| Error::new(ErrorCode::InvalidInput, "Cannot read operator config."))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(Error::new(
+            ErrorCode::InvalidInput,
+            "Operator config exceeds size limit.",
+        ));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|_| Error::new(ErrorCode::InvalidInput, "Operator config is invalid."))
 }

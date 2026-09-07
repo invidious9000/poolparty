@@ -209,17 +209,27 @@ impl Transport for HttpTransport {
             .await
             .map_err(|_| uncertain())?;
         let status = response.status().as_u16();
-        let headers = ["content-type", "retry-after", "x-request-id", "request-id"]
-            .into_iter()
-            .filter_map(|name| {
-                response
-                    .headers()
-                    .get(name)
-                    .and_then(|v| v.to_str().ok())
-                    .filter(|v| v.len() <= 1024)
-                    .map(|v| (name.into(), v.into()))
-            })
-            .collect();
+        let mut headers: Vec<(String, String)> =
+            ["content-type", "retry-after", "x-request-id", "request-id"]
+                .into_iter()
+                .filter_map(|name| {
+                    response
+                        .headers()
+                        .get(name)
+                        .and_then(|v| v.to_str().ok())
+                        .filter(|v| v.len() <= 1024)
+                        .map(|v| (name.into(), v.into()))
+                })
+                .collect();
+        // The Codex backend can omit Content-Type on a valid requested SSE stream.
+        // Only this enrolled product gets the exception; framing and a native
+        // terminal event remain mandatory, and an explicit wrong MIME is refused.
+        let missing_codex_content_type = (200..300).contains(&status)
+            && request.prepared.account.product == Product::CodexSubscription
+            && !response.headers().contains_key("content-type");
+        if missing_codex_content_type {
+            headers.push(("content-type".into(), "text/event-stream".into()));
+        }
         let is_sse = response
             .headers()
             .get("content-type")
@@ -247,7 +257,7 @@ impl Transport for HttpTransport {
                 }
                 return;
             }
-            if !is_sse { yield Err(uncertain()); return; }
+            if !is_sse && !missing_codex_content_type { yield Err(uncertain()); return; }
             let mut parser = TerminalParser::new(protocol);
             while let Some(chunk) = body.next().await {
                 let chunk = match chunk { Ok(chunk) => chunk, Err(_) => { yield Err(uncertain()); return; } };

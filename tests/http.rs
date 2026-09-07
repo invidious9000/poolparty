@@ -232,6 +232,133 @@ async fn value(response: axum::response::Response) -> Value {
     )
     .unwrap()
 }
+
+#[tokio::test]
+async fn accounts_require_auth_and_project_only_authorized_inventory_and_usage() {
+    let fixture = Fixture::new(Product::GlmCoding, false).await;
+    let mut visible = fixture
+        .ledger
+        .accounts(&principal("caller-a", &["pool-a"]))
+        .await
+        .unwrap()
+        .remove(0);
+    visible.pools.insert(PoolId::new("pool-hidden").unwrap());
+    visible.credential.generation = 7;
+    visible.enabled = false;
+    fixture.ledger.put_account(visible.clone()).await.unwrap();
+    let mut hidden = visible.clone();
+    hidden.id = AccountId::new("hidden-account").unwrap();
+    hidden.pools = BTreeSet::from([PoolId::new("pool-hidden").unwrap()]);
+    hidden.credential.id = CredentialId::new("hidden-credential").unwrap();
+    hidden.quota_owner = QuotaOwnerId::new("hidden-owner").unwrap();
+    fixture.ledger.put_account(hidden).await.unwrap();
+    fixture
+        .ledger
+        .observe(UsageObservation {
+            owner: visible.quota_owner.clone(),
+            observed_at: 90,
+            valid_until: 1000,
+            status: CapacityStatus::Exhausted,
+            windows: vec![UsageWindow {
+                key: "primary".into(),
+                unit: "percent".into(),
+                used: Some(100),
+                limit: Some(100),
+                resets_at: Some(999),
+                used_percent: Some("100".into()),
+                window_seconds: Some(3600),
+            }],
+            balances: vec![],
+            source: "synthetic".into(),
+            provider_available: Some(false),
+        })
+        .await
+        .unwrap();
+    let response = fixture
+        .request("GET", "/api/v1/accounts", None, Value::Null)
+        .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = fixture
+        .request(
+            "GET",
+            "/api/v1/accounts",
+            Some("caller-a-token"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body = value(response).await;
+    let accounts = body["accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 1);
+    let account = &accounts[0];
+    assert_eq!(account["id"], "account-a");
+    assert_eq!(account["product"], "glm_coding");
+    assert_eq!(account["pools"], json!(["pool-a"]));
+    assert_eq!(account["models"], json!(["model-a"]));
+    assert_eq!(account["enabled"], false);
+    assert_eq!(account["credential_generation"], 7);
+    assert_eq!(account["quota_owner"], "quota-a");
+    assert_eq!(account["usage"]["status"], "exhausted");
+    assert_eq!(account["usage"]["windows"][0]["resets_at"], 999);
+    for forbidden in [
+        "pool-hidden",
+        "hidden-account",
+        "hidden-owner",
+        "hidden-credential",
+        "key-a",
+        "synthetic-provider-key",
+    ] {
+        assert!(!body.to_string().contains(forbidden));
+    }
+    assert!(account.get("credential").is_none());
+    let response = fixture
+        .request(
+            "GET",
+            "/api/v1/accounts",
+            Some("revoked-pool-token"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(value(response).await, json!({"accounts":[]}));
+}
+
+#[tokio::test]
+async fn accounts_preserve_absent_usage_as_unknown_instead_of_inventing_capacity() {
+    let fixture = Fixture::new(Product::GlmCoding, false).await;
+    fixture
+        .ledger
+        .put_account(Account {
+            id: AccountId::new("account-unobserved").unwrap(),
+            product: Product::GlmCoding,
+            quota_owner: QuotaOwnerId::new("quota-unobserved").unwrap(),
+            pools: BTreeSet::from([PoolId::new("pool-a").unwrap()]),
+            credential: CredentialRef {
+                id: CredentialId::new("key-unobserved").unwrap(),
+                generation: 1,
+            },
+            models: BTreeSet::from(["model-a".into()]),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let response = fixture
+        .request(
+            "GET",
+            "/api/v1/accounts",
+            Some("caller-a-token"),
+            Value::Null,
+        )
+        .await;
+    let body = value(response).await;
+    let account = body["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|account| account["id"] == "account-unobserved")
+        .unwrap();
+    assert!(account["usage"].is_null());
+}
 fn model_body() -> Value {
     json!({"model":"model-a", "stream":true, "messages":[]})
 }

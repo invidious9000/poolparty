@@ -142,7 +142,10 @@ impl CredentialMaintenance {
         let path = self.marker_path(id);
         let current_identity = identity_digest(&auth);
         let current_access = access_digest(&secret)?;
-        if read_marker(path.clone()).await?.is_some() {
+        if read_marker(path.clone(), self.state.clone())
+            .await?
+            .is_some()
+        {
             // A new token alone cannot prove that all writeback checks succeeded.
             // Pending refreshes need explicit reconciliation, including after restart.
             return Err(unresolved());
@@ -157,7 +160,7 @@ impl CredentialMaintenance {
             identity_digest: current_identity,
             access_digest: current_access,
         };
-        write_marker(path.clone(), pending).await?;
+        write_marker(path.clone(), pending, self.state.clone()).await?;
         // From this point every error leaves the marker. A later invocation cannot
         // blindly reissue a refresh using the old token after ambiguous issuance.
         let next = self.refresher.refresh(&secret, now).await?;
@@ -175,7 +178,7 @@ impl CredentialMaintenance {
         if !usable {
             return Err(unresolved());
         }
-        remove_marker(path).await?;
+        remove_marker(path, self.state.clone()).await?;
         Ok(updated)
     }
 
@@ -220,8 +223,12 @@ fn marker_error() -> Error {
     )
 }
 
-async fn read_marker(path: PathBuf) -> Result<Option<PendingRefresh>> {
+async fn read_marker(
+    path: PathBuf,
+    ownership: Arc<StateDirectory>,
+) -> Result<Option<PendingRefresh>> {
     tokio::task::spawn_blocking(move || {
+        let _ownership = ownership;
         let mut file = match File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -242,8 +249,13 @@ async fn read_marker(path: PathBuf) -> Result<Option<PendingRefresh>> {
     .await
     .map_err(|_| marker_error())?
 }
-async fn write_marker(path: PathBuf, marker: PendingRefresh) -> Result<()> {
+async fn write_marker(
+    path: PathBuf,
+    marker: PendingRefresh,
+    ownership: Arc<StateDirectory>,
+) -> Result<()> {
     tokio::task::spawn_blocking(move || {
+        let _ownership = ownership;
         let bytes = serde_json::to_vec(&marker).map_err(|_| marker_error())?;
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -262,8 +274,9 @@ async fn write_marker(path: PathBuf, marker: PendingRefresh) -> Result<()> {
     .await
     .map_err(|_| marker_error())?
 }
-async fn remove_marker(path: PathBuf) -> Result<()> {
+async fn remove_marker(path: PathBuf, ownership: Arc<StateDirectory>) -> Result<()> {
     tokio::task::spawn_blocking(move || {
+        let _ownership = ownership;
         std::fs::remove_file(&path).map_err(|_| marker_error())?;
         File::open(path.parent().ok_or_else(marker_error)?)
             .and_then(|f| f.sync_all())

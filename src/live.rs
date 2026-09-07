@@ -1,4 +1,4 @@
-//! Explicit, one-shot credential/usage checks. No persistent production listener yet.
+//! Shared private inventory and explicit one-shot credential/usage checks.
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ use crate::{
     usage::{HttpUsageCollector, UsageEndpoint},
 };
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LiveConfig {
     pub state_dir: PathBuf,
@@ -32,14 +32,14 @@ pub struct LiveConfig {
     pub oauth: OAuthConfig,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthConfig {
     pub endpoint: String,
     pub client_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LiveAccount {
     pub id: AccountId,
@@ -94,65 +94,7 @@ pub async fn run(
     service_token: SecretValue,
     mode: LiveMode,
 ) -> Result<CheckReport> {
-    if config.accounts.is_empty() {
-        return Err(Error::new(
-            ErrorCode::InvalidInput,
-            "At least one account must be explicitly configured.",
-        ));
-    }
-    let mut account_ids = BTreeSet::new();
-    let mut credential_owners = BTreeMap::new();
-    let mut quota_policies = BTreeMap::new();
-    let mapped: BTreeSet<_> = config
-        .credentials
-        .iter()
-        .map(|field| field.credential.clone())
-        .collect();
-    for account in &config.accounts {
-        if !account_ids.insert(account.id.clone())
-            || !mapped.contains(&account.credential)
-            || account.model.trim().is_empty()
-            || account.max_concurrency == 0
-        {
-            return Err(Error::new(
-                ErrorCode::InvalidInput,
-                "Invalid account inventory.",
-            ));
-        }
-        if account.product == Product::CodexSubscription
-            && account
-                .expected_account_id
-                .as_deref()
-                .is_none_or(str::is_empty)
-        {
-            return Err(Error::new(
-                ErrorCode::InvalidInput,
-                "Codex requires an explicitly enrolled upstream account identity.",
-            ));
-        }
-        let ownership = (
-            account.product,
-            account.expected_account_id.as_deref(),
-            &account.quota_owner,
-        );
-        if let Some(previous) = credential_owners.insert(&account.credential, ownership)
-            && previous != ownership
-        {
-            return Err(Error::new(
-                ErrorCode::InvalidInput,
-                "Credential aliases must agree on product, upstream account identity and quota owner.",
-            ));
-        }
-        let policy = (account.max_concurrency, account.unknown_capacity);
-        if let Some(previous) = quota_policies.insert(&account.quota_owner, policy)
-            && previous != policy
-        {
-            return Err(Error::new(
-                ErrorCode::InvalidInput,
-                "Accounts sharing a quota owner must agree on admission policy.",
-            ));
-        }
-    }
+    let mapped = validate_inventory(&config)?;
     if let LiveMode::Refresh(id) = &mode
         && !config
             .accounts
@@ -165,7 +107,7 @@ pub async fn run(
         ));
     }
     let state = Arc::new(StateDirectory::acquire(&config.state_dir)?);
-    let ledger = Arc::new(SqliteLedger::open(&state.database)?);
+    let ledger = Arc::new(SqliteLedger::open(&state.database)?.with_ownership(state.clone()));
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     ledger.recover(clock.now()).await?;
     let store = Arc::new(OnePasswordStore::new(
@@ -185,47 +127,7 @@ pub async fn run(
         ledger.clone(),
         mapped.into_iter().collect(),
     )?;
-    // Product endpoints are trusted configuration, never caller-controlled URLs.
-    let mut usage_endpoints = Vec::new();
-    let mut inference_endpoints = Vec::new();
-    for account in &config.accounts {
-        if let Some(url) = &account.usage_url {
-            if let Some(existing) = usage_endpoints
-                .iter()
-                .find(|e: &&UsageEndpoint| e.product == account.product)
-            {
-                if existing.url != *url {
-                    return Err(Error::new(
-                        ErrorCode::InvalidInput,
-                        "Conflicting product usage endpoints.",
-                    ));
-                }
-            } else {
-                usage_endpoints.push(UsageEndpoint {
-                    product: account.product,
-                    url: url.clone(),
-                });
-            }
-        }
-        if let Some(url) = &account.inference_url {
-            if let Some(existing) = inference_endpoints
-                .iter()
-                .find(|e: &&Endpoint| e.product == account.product)
-            {
-                if existing.url != *url {
-                    return Err(Error::new(
-                        ErrorCode::InvalidInput,
-                        "Conflicting product inference endpoints.",
-                    ));
-                }
-            } else {
-                inference_endpoints.push(Endpoint {
-                    product: account.product,
-                    url: url.clone(),
-                });
-            }
-        }
-    }
+    let (usage_endpoints, inference_endpoints) = inventory_endpoints(&config.accounts)?;
     let collector = HttpUsageCollector::new(usage_endpoints, false)?;
     let transport = Arc::new(HttpTransport::new(inference_endpoints, false)?);
     let router = Router::new(ledger.clone(), transport, store.clone(), clock.clone());
@@ -440,4 +342,115 @@ async fn await_probe_settlement(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// Validate all aliases before state acquisition or external credential operations.
+pub fn validate_inventory(config: &LiveConfig) -> Result<BTreeSet<CredentialId>> {
+    if config.accounts.is_empty() {
+        return Err(Error::new(
+            ErrorCode::InvalidInput,
+            "At least one account must be explicitly configured.",
+        ));
+    }
+    let mut account_ids = BTreeSet::new();
+    let mut credential_owners = BTreeMap::new();
+    let mut quota_policies = BTreeMap::new();
+    let mapped: BTreeSet<_> = config
+        .credentials
+        .iter()
+        .map(|field| field.credential.clone())
+        .collect();
+    for account in &config.accounts {
+        if !account_ids.insert(account.id.clone())
+            || !mapped.contains(&account.credential)
+            || account.model.trim().is_empty()
+            || account.max_concurrency == 0
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidInput,
+                "Invalid account inventory.",
+            ));
+        }
+        if account.product == Product::CodexSubscription
+            && account
+                .expected_account_id
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidInput,
+                "Codex requires an explicitly enrolled upstream account identity.",
+            ));
+        }
+        let ownership = (
+            account.product,
+            account.expected_account_id.as_deref(),
+            &account.quota_owner,
+        );
+        if let Some(previous) = credential_owners.insert(&account.credential, ownership)
+            && previous != ownership
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidInput,
+                "Credential aliases must agree on product, upstream account identity and quota owner.",
+            ));
+        }
+        let policy = (account.max_concurrency, account.unknown_capacity);
+        if let Some(previous) = quota_policies.insert(&account.quota_owner, policy)
+            && previous != policy
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidInput,
+                "Accounts sharing a quota owner must agree on admission policy.",
+            ));
+        }
+    }
+    Ok(mapped)
+}
+
+pub(crate) fn inventory_endpoints(
+    accounts: &[LiveAccount],
+) -> Result<(Vec<UsageEndpoint>, Vec<Endpoint>)> {
+    // Product endpoints are trusted configuration, never caller-controlled URLs.
+    let mut usage_endpoints = Vec::new();
+    let mut inference_endpoints = Vec::new();
+    for account in accounts {
+        if let Some(url) = &account.usage_url {
+            if let Some(existing) = usage_endpoints
+                .iter()
+                .find(|e: &&UsageEndpoint| e.product == account.product)
+            {
+                if existing.url != *url {
+                    return Err(Error::new(
+                        ErrorCode::InvalidInput,
+                        "Conflicting product usage endpoints.",
+                    ));
+                }
+            } else {
+                usage_endpoints.push(UsageEndpoint {
+                    product: account.product,
+                    url: url.clone(),
+                });
+            }
+        }
+        if let Some(url) = &account.inference_url {
+            if let Some(existing) = inference_endpoints
+                .iter()
+                .find(|e: &&Endpoint| e.product == account.product)
+            {
+                if existing.url != *url {
+                    return Err(Error::new(
+                        ErrorCode::InvalidInput,
+                        "Conflicting product inference endpoints.",
+                    ));
+                }
+            } else {
+                inference_endpoints.push(Endpoint {
+                    product: account.product,
+                    url: url.clone(),
+                });
+            }
+        }
+    }
+    Ok((usage_endpoints, inference_endpoints))
 }

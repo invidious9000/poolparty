@@ -1156,3 +1156,50 @@ async fn existing_credential_metadata_fences_upgrades_before_watermark_populatio
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn account_listing_filters_principal_visibility_and_hides_other_pool_memberships() {
+    let fixture = Fixture::new(1).await;
+    let mut shared = account("account-a", "owner-a");
+    shared.pools.insert(PoolId::new("pool-b").unwrap());
+    fixture.ledger.put_account(shared.clone()).await.unwrap();
+    let mut private = account("account-private", "owner-private");
+    private.pools = BTreeSet::from([PoolId::new("pool-b").unwrap()]);
+    private.enabled = false;
+    fixture.ledger.put_account(private.clone()).await.unwrap();
+    let visible = fixture.ledger.accounts(&fixture.principal).await.unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id, shared.id);
+    assert_eq!(visible[0].pools, fixture.principal.pools);
+    let other = Principal {
+        id: PrincipalId::new("principal-b").unwrap(),
+        pools: BTreeSet::from([PoolId::new("pool-b").unwrap()]),
+    };
+    let visible = fixture.ledger.accounts(&other).await.unwrap();
+    assert_eq!(visible.len(), 2);
+    assert!(visible.iter().all(|account| account.pools == other.pools));
+    assert!(
+        visible
+            .iter()
+            .any(|account| account.id == private.id && !account.enabled)
+    );
+    let revoked = Principal {
+        id: fixture.principal.id.clone(),
+        pools: BTreeSet::new(),
+    };
+    assert!(fixture.ledger.accounts(&revoked).await.unwrap().is_empty());
+    // Listing is a projection; it must not delete hidden memberships in storage.
+    let both = Principal {
+        id: PrincipalId::new("operator").unwrap(),
+        pools: shared.pools.clone(),
+    };
+    let visible = fixture.ledger.accounts(&both).await.unwrap();
+    assert_eq!(
+        visible
+            .into_iter()
+            .find(|account| account.id == shared.id)
+            .unwrap()
+            .pools,
+        shared.pools
+    );
+}

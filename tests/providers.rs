@@ -41,6 +41,21 @@ impl Drop for Origin {
 }
 
 async fn origin(status: StatusCode, chunks: Vec<Bytes>, hold_open: bool) -> Origin {
+    origin_with_content_type(
+        status,
+        chunks,
+        hold_open,
+        Some("text/event-stream; charset=utf-8"),
+    )
+    .await
+}
+
+async fn origin_with_content_type(
+    status: StatusCode,
+    chunks: Vec<Bytes>,
+    hold_open: bool,
+    content_type: Option<&'static str>,
+) -> Origin {
     let calls = Arc::new(AtomicUsize::new(0));
     let seen: Seen = Arc::new(Mutex::new(Vec::new()));
     let app = Router::new().route(
@@ -64,9 +79,11 @@ async fn origin(status: StatusCode, chunks: Vec<Bytes>, hold_open: bool) -> Orig
                         }
                         if hold_open { std::future::pending::<()>().await; }
                     };
-                    Response::builder()
-                        .status(status)
-                        .header("content-type", "text/event-stream; charset=utf-8")
+                    let mut response = Response::builder().status(status);
+                    if let Some(content_type) = content_type {
+                        response = response.header("content-type", content_type);
+                    }
+                    response
                         .header("x-request-id", "synthetic-request")
                         .header("set-cookie", "private=synthetic")
                         .header("location", "/inference")
@@ -543,4 +560,73 @@ async fn local_credential_protocol_and_configuration_failures_do_not_dispatch() 
         )
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn codex_missing_content_type_accepts_only_proven_sse_completion() {
+    let wire = Bytes::from_static(b"event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n");
+    let origin = origin_with_content_type(StatusCode::OK, vec![wire.clone()], true, None).await;
+    let response = transport(&origin, Product::CodexSubscription)
+        .send(request(Product::CodexSubscription))
+        .await
+        .unwrap();
+    assert!(
+        response
+            .headers
+            .iter()
+            .any(|(name, value)| name == "content-type" && value == "text/event-stream")
+    );
+    let (actual, terminal, errors) =
+        tokio::time::timeout(Duration::from_secs(3), collect(response))
+            .await
+            .unwrap();
+    assert_eq!(actual, wire);
+    assert_eq!(terminal, [Settlement::Succeeded]);
+    assert!(errors.is_empty());
+    assert_eq!(origin.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn missing_header_exception_never_accepts_eof_or_explicit_wrong_mime() {
+    for (product, mime, wire) in [
+        (
+            Product::CodexSubscription,
+            None,
+            b"data: {\"type\":\"response.created\"}\n\n".as_slice(),
+        ),
+        (
+            Product::CodexSubscription,
+            None,
+            b"<html>synthetic non-stream body</html>".as_slice(),
+        ),
+        (
+            Product::CodexSubscription,
+            Some("application/json"),
+            b"data: {\"type\":\"response.completed\"}\n\n".as_slice(),
+        ),
+        (
+            Product::GlmCoding,
+            None,
+            b"data: {\"type\":\"message_stop\"}\n\n".as_slice(),
+        ),
+    ] {
+        let origin = origin_with_content_type(
+            StatusCode::OK,
+            vec![Bytes::copy_from_slice(wire)],
+            false,
+            mime,
+        )
+        .await;
+        let (_, terminal, errors) = collect(
+            transport(&origin, product)
+                .send(request(product))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(terminal.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].certainty, DispatchCertainty::Unknown);
+        assert_eq!(origin.calls.load(Ordering::SeqCst), 1);
+    }
 }

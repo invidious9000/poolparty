@@ -15,6 +15,7 @@ use crate::{domain::*, ports::Ledger};
 #[derive(Clone)]
 pub struct SqliteLedger {
     connection: Arc<Mutex<Connection>>,
+    ownership: Option<Arc<dyn Send + Sync>>,
 }
 
 fn unavailable() -> Error {
@@ -89,7 +90,15 @@ impl SqliteLedger {
             .map_err(|_| unavailable())?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            ownership: None,
         })
+    }
+
+    /// Keep exclusive process ownership alive through blocking database work,
+    /// including when its awaiting async task is cancelled during shutdown.
+    pub fn with_ownership(mut self, ownership: Arc<dyn Send + Sync>) -> Self {
+        self.ownership = Some(ownership);
+        self
     }
 
     async fn run<T, F>(&self, operation: F) -> Result<T>
@@ -97,13 +106,16 @@ impl SqliteLedger {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
-        let connection = self.connection.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut db = connection.lock().map_err(|_| unavailable())?;
-            operation(&mut db)
-        })
-        .await
-        .map_err(|_| unavailable())?
+        let ledger = self.clone();
+        tokio::task::spawn_blocking(move || ledger.blocking(operation))
+            .await
+            .map_err(|_| unavailable())?
+    }
+
+    fn blocking<T>(&self, operation: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
+        let _ownership = &self.ownership;
+        let mut db = self.connection.lock().map_err(|_| unavailable())?;
+        operation(&mut db)
     }
 }
 
@@ -270,6 +282,50 @@ fn advance(
 
 #[async_trait]
 impl Ledger for SqliteLedger {
+    async fn accounts(&self, principal: &Principal) -> Result<Vec<Account>> {
+        let principal = principal.clone();
+        self.run(move |db| {
+            let mut accounts: Vec<Account> = all(db, "SELECT data FROM accounts ORDER BY id", [])?;
+            for account in &mut accounts {
+                account.pools.retain(|pool| principal.pools.contains(pool));
+            }
+            accounts.retain(|account| !account.pools.is_empty());
+            Ok(accounts)
+        })
+        .await
+    }
+    async fn set_account_enabled(&self, id: &AccountId, enabled: bool) -> Result<()> {
+        let id = id.clone();
+        self.run(move |db| {
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| unavailable())?;
+            let mut account: Account =
+                get(&tx, "SELECT data FROM accounts WHERE id=?1", [id.as_str()])?
+                    .ok_or_else(|| Error::new(ErrorCode::NotFound, "account not found"))?;
+            account.enabled = enabled;
+            tx.execute(
+                "UPDATE accounts SET data=?2 WHERE id=?1",
+                params![id.as_str(), encode(&account)?],
+            )
+            .map_err(|_| unavailable())?;
+            tx.commit().map_err(|_| unavailable())
+        })
+        .await
+    }
+
+    async fn usage_observation(&self, owner: &QuotaOwnerId) -> Result<Option<UsageObservation>> {
+        let owner = owner.clone();
+        self.run(move |db| {
+            get(
+                db,
+                "SELECT data FROM observations WHERE id=?1",
+                [owner.as_str()],
+            )
+        })
+        .await
+    }
+
     async fn advance_credential_generation(&self, reference: &CredentialRef) -> Result<()> {
         let reference = reference.clone();
         self.run(move |db| {
@@ -653,5 +709,62 @@ impl Ledger for SqliteLedger {
             tx.commit().map_err(|_| unavailable())
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use crate::config::StateDirectory;
+
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_release_state_lock_before_blocking_sql_finishes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().canonicalize().unwrap().join("state");
+        let state = Arc::new(StateDirectory::acquire(&path).unwrap());
+        let weak = Arc::downgrade(&state);
+        let ledger = SqliteLedger::open(&state.database)
+            .unwrap()
+            .with_ownership(state.clone());
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let worker = ledger.clone();
+        let waiter = tokio::spawn(async move {
+            worker
+                .run(move |db| {
+                    db.execute_batch("CREATE TABLE ownership_probe (value INTEGER NOT NULL)")
+                        .map_err(|_| unavailable())?;
+                    let _ = entered.send(());
+                    released.recv().map_err(|_| unavailable())?;
+                    db.execute("INSERT INTO ownership_probe(value) VALUES(1)", [])
+                        .map_err(|_| unavailable())?;
+                    Ok(())
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started)
+            .await
+            .unwrap()
+            .unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        drop(ledger);
+        drop(state);
+        assert!(weak.upgrade().is_some());
+        assert!(StateDirectory::acquire(&path).is_err());
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let reopened_state = StateDirectory::acquire(&path).unwrap();
+        let connection = Connection::open(&reopened_state.database).unwrap();
+        let rows: u64 = connection
+            .query_row("SELECT count(*) FROM ownership_probe", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 }

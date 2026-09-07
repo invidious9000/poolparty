@@ -7,18 +7,23 @@ Independent clients share account capacity and usage visibility through one
 service. Sessions keep their provider/account binding; an exhausted resumed
 session returns an error so its caller can wait or explicitly start a new session.
 
-**Status: experimental Rust core, synthetic demo and explicit maintenance commands.**
-Durable SQLite bindings/admission, authenticated control and streaming routes,
-HTTP transport, 1Password storage, fenced Codex refresh and provider usage readers
-are implemented with synthetic fixtures. The demo contacts no providers. Separate
-one-shot commands can check enrolled credentials, collect usage, rotate a Codex
-credential or send a configured inference probe. There is no persistent production
-listener or refresh scheduler. Live conformance, dashboard, general control CLI
-and production deployment still have acceptance work outstanding.
+**Status: experimental persistent daemon with a verified Codex HTTP slice.**
+`poolpartyd --serve` provides durable SQLite bindings/admission, authenticated
+control and streaming routes, account/usage visibility, managed 1Password
+credentials, fenced Codex refresh and periodic usage collection. Native Codex
+start, tools and resume have passed through a daemon restart and credential
+rotation with the same binding. A small Python control helper accompanies the
+HTTP API. The synthetic demo and explicit one-shot maintenance/probe commands
+remain available.
+
+WebSockets, compaction, complete provider conformance, OIDC, dashboard and
+production deployment remain separate acceptance gates.
 Anthropic protocol compatibility does not include actual Anthropic provider
 integration.
 
 - [Build, test, run the demo and current limitations](docs/development.md)
+- [Run the authenticated daemon and control helper](docs/daemon.md)
+- [Native Codex start/resume validation](docs/native-codex.md)
 - [Credential maintenance, usage checks and explicit probes](docs/credential-maintenance.md)
 - [1Password storage and exclusive writer requirements](docs/onepassword.md)
 - [Core module contracts and acceptance boundary](design/core-implementation.md)

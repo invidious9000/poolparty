@@ -1,5 +1,5 @@
 //! Authenticated control and native streaming routes. Static grants are a local scaffold.
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use axum::{
     Extension, Json, Router as HttpRouter,
@@ -10,6 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
+use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -85,6 +86,7 @@ struct AppState {
 pub fn app(runtime: Arc<Router>, grants: BearerGrants) -> HttpRouter {
     let state = Arc::new(AppState { runtime, grants });
     let protected = HttpRouter::new()
+        .route("/api/v1/accounts", get(inspect_accounts))
         .route("/api/v1/sessions", post(create_binding))
         .route("/api/v1/sessions/{id}", get(inspect_binding))
         .route("/api/v1/sessions/{id}/close", post(close_binding))
@@ -132,6 +134,65 @@ async fn authenticate(
 
 fn binding_id(value: String) -> Result<BindingId> {
     BindingId::new(value).map_err(|_| Error::new(ErrorCode::InvalidInput, "Invalid binding ID"))
+}
+
+/// Explicit projection keeps credential references out of the caller control plane.
+#[derive(Serialize)]
+struct AccountStatus {
+    id: AccountId,
+    product: Product,
+    pools: BTreeSet<PoolId>,
+    models: BTreeSet<String>,
+    enabled: bool,
+    quota_owner: QuotaOwnerId,
+    credential_generation: u64,
+    usage: Option<UsageObservation>,
+}
+
+async fn inspect_accounts(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<Principal>,
+) -> Response {
+    let result = async {
+        let mut accounts = Vec::new();
+        for account in state.runtime.ledger().accounts(&principal).await? {
+            let pools: BTreeSet<_> = account
+                .pools
+                .intersection(&principal.pools)
+                .cloned()
+                .collect();
+            if pools.is_empty() {
+                continue;
+            }
+            let usage = state
+                .runtime
+                .ledger()
+                .usage_observation(&account.quota_owner)
+                .await?;
+            accounts.push(AccountStatus {
+                id: account.id,
+                product: account.product,
+                pools,
+                models: account.models,
+                enabled: account.enabled,
+                quota_owner: account.quota_owner,
+                credential_generation: account.credential.generation,
+                usage,
+            });
+        }
+        Result::<_>::Ok(accounts)
+    }
+    .await;
+    match result {
+        Ok(accounts) => {
+            let mut response = Json(json!({"accounts":accounts})).into_response();
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response
+        }
+        Err(error) => error_response(error, Protocol::Responses),
+    }
 }
 
 async fn create_binding(

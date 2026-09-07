@@ -1,7 +1,8 @@
 # First core implementation
 
-Status: first implementation exists. Provider conformance and deployment remain
-gates; see [development](../docs/development.md) for commands and limits.
+Status: persistent HTTP/SSE daemon and bounded native Codex slice implemented.
+Broader provider conformance and deployment remain gates; see
+[development](../docs/development.md) for commands and evidence.
 
 One Rust crate contains domain types and ports, SQLite persistence, an application
 service, HTTP handlers and provider transports. `domain` and `ports` are the shared
@@ -14,12 +15,15 @@ modules adopt them.
   dispatch certainty and object-safe async boundaries.
 - `storage.rs`: `SqliteLedger::open(path)` implementing `Ledger`. Database work
   runs outside async executor threads; short transactions never span network I/O.
+  Owned blocking workers retain exclusive state custody through cancellation.
 - `runtime.rs`: `Router`, coordinating admission, secret loading, durable dispatch,
   streaming, settlement and cancellation. `Router::new` takes four `Arc` values:
   `Ledger`, `Transport`, `CredentialStore`, and `Clock` implementations.
 - `http.rs`: `app(Arc<Router>, BearerGrants) -> axum::Router`; native bound routes
-  and create/inspect/close/attempt-inspect control routes. Grants own authenticated
-  principals and pool authorization; bodies cannot supply a trusted principal.
+  and account-status/create/inspect/close/attempt-inspect control routes. Grants
+  own authenticated principals and pool authorization; bodies cannot supply a
+  trusted principal. Account status redacts unauthorized pool memberships and
+  omits credential IDs, vault references and secret values.
 - `providers.rs`: one-attempt HTTP/SSE adapters and synthetic transport. Endpoint
   and credential configuration comes from trusted operator configuration.
 - `usage.rs`: bounded, read-only provider observations with explicit unknown and
@@ -30,9 +34,15 @@ modules adopt them.
   decoded JWT claims support consistency/expiry checks, not authentication.
 - `maintenance.rs`: credential refresh ownership, durable pending fences, identity
   checks and persistent generation watermarks through the ledger.
-- `live.rs`: explicit one-shot inventory checks, refresh and configured probes.
-- `config.rs`, `main.rs`: exclusive startup, synthetic demo and maintenance mode
-  selection. A persistent production listener remains a later integration gate.
+- `managed.rs`: enrolled account synchronization, credential and usage freshness
+  caches, alias health fencing and preparation before request admission.
+- `live.rs`: shared inventory validation and explicit one-shot checks, refresh
+  and configured probes.
+- `service.rs`: persistent `--serve` wiring, environment-backed scoped grants,
+  initial/periodic synchronization and bounded SIGINT/SIGTERM drain.
+- `config.rs`, `main.rs`: exclusive startup and daemon/demo/maintenance selection.
+- `bin/poolparty`: Python standard-library JSON control helper. Grants are read
+  from the environment and never supplied as command arguments.
 
 The application method is `Router::execute(&self, principal: &Principal,
 binding: BindingId, operation: Option<OperationId>, protocol: Protocol,
@@ -41,6 +51,10 @@ body: Bytes) -> domain::Result<RoutedResponse>`. A routed response contains
 `stream: Pin<Box<dyn Stream<Item = domain::Result<Bytes>> + Send>>`.
 `Router::ledger()` returns `&Arc<dyn Ledger>` and `Router::now()` returns the
 current timestamp for authenticated control handlers.
+`Router::with_preparation` installs managed account checks before admission.
+`Router::with_ownership` retains state custody through detached dispatch, streaming
+and settlement. Credential and ledger workers likewise retain ownership until
+they finish, including when the requesting task disappears.
 
 ## First acceptance boundary
 
@@ -64,6 +78,11 @@ Native terminal bytes and completion evidence travel as one transport event. The
 application commits settlement before yielding that final chunk. A completed
 rejection body can instead provide a separate completion event at EOF. Bare socket
 EOF never establishes completion of an inference stream.
+
+The Codex backend has returned valid SSE without a `Content-Type` header. Only
+that product's successful missing-header response enters the bounded SSE parser
+with downstream `text/event-stream` metadata. An explicitly incompatible MIME
+type remains an error; missing headers never relax frame or terminal-event checks.
 
 Core admission initially enforces local account-owner concurrency and explicit
 available/exhausted/unknown/auth observations. Window and decimal-balance types

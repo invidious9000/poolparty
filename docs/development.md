@@ -1,12 +1,13 @@
 # Developing the core
 
-The executable provides a loopback-only synthetic demo and separate one-shot
-credential maintenance modes. The demo exercises the real SQLite ledger, caller
-authentication, control API and stream lifecycle without contacting any provider.
-Explicit `--check`, `--probe` and `--refresh` modes can load operator-enrolled
-credentials and contact configured HTTPS endpoints. They do not start a production
-listener. See [credential maintenance](credential-maintenance.md) before using
-these modes; even `--check` can rotate an expiring Codex credential.
+The executable provides an authenticated persistent daemon, a loopback-only
+synthetic demo and one-shot credential maintenance modes. `--serve` maintains
+enrolled credentials and usage, then routes requests through durable binding and
+admission. See [daemon operations](daemon.md) for configuration and the control
+helper. The demo exercises the same ledger and HTTP lifecycle without providers.
+Explicit `--check`, `--probe` and `--refresh` modes operate once and exit. Read
+[credential maintenance](credential-maintenance.md) before using real inventory;
+both daemon startup and `--check` can rotate an expiring Codex credential.
 
 ## Build and verify
 
@@ -19,6 +20,7 @@ cargo nextest run --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --locked
 python3 spikes/core/smoke.py
+python3 -m unittest discover -s spikes/codex -p 'test_*.py'
 ```
 
 The smoke check starts its own daemon on loopback, generates a temporary caller
@@ -63,6 +65,10 @@ Resume uses `GET /api/v1/sessions/{id}` and the same bound route.
 ## Implemented boundaries
 
 - Caller/pool isolation, immutable session intent, explicit close and tombstones.
+- Persistent authenticated service, authorized account/usage inspection and an
+  environment-authenticated Python control helper.
+- Initial and periodic managed inventory synchronization, checks before request
+  admission, credential-alias fencing and bounded graceful shutdown.
 - Shared quota-owner concurrency across credential aliases and protocols.
 - Explicit usage freshness and unknown-capacity policy; stale success cannot
   clear a newer exhaustion/auth failure. Window and balance evidence are preserved.
@@ -72,6 +78,9 @@ Resume uses `GET /api/v1/sessions/{id}` and the same bound route.
 - Terminal SSE bytes carry completion evidence; the ledger settles before those
   bytes reach the caller. Partial EOF and disconnect preserve uncertain pressure.
 - Bounded bodies/SSE frames, redacted secret types and response-header allowlists.
+- Codex-only handling for successful SSE responses missing `Content-Type`:
+  downstream metadata becomes `text/event-stream`, while strict frame/terminal
+  validation remains required. Explicitly incompatible MIME types still fail.
 - Explicit 1Password field mappings and versioned writeback under one writer;
   serialized Codex refresh with a durable pending fence and SQLite generation
   watermark. An unresolved refresh requires manual reconciliation.
@@ -88,11 +97,11 @@ retry configuration/conformance remains a gate, not an exactly-once guarantee.
 
 ## Remaining acceptance gates
 
-Persistent production listener wiring, automatic refresh/collection scheduling,
-supported-client live conformance, Kimi account-usage collection, OIDC and workload
-grant lifecycle, model-specific limits, PAYG spend reservations, usage-driven
-selection scoring, explicit reconciliation/admin recovery, backup/restore tooling
-and graceful-drain deadlines remain incomplete.
+Broader native-client/provider conformance, Kimi account-usage collection, OIDC and
+workload grant lifecycle, model-specific limits, PAYG spend reservations,
+usage-driven selection scoring, explicit reconciliation/admin recovery and
+backup/restore tooling remain incomplete. The qualified native HTTP slice below
+does not establish these independent capabilities.
 Uncertain work deliberately retains capacity; the initial HTTP surface offers
 inspection but no operator override to release it without evidence. Maintenance
 pending markers likewise remain fenced after restart; a newer vault generation
@@ -105,22 +114,27 @@ and MiniMax remain future options.
 
 ## Current validation evidence
 
-The credential/usage slice passes 91 synthetic tests, formatting, workspace check,
-clippy with warnings denied, and the process restart smoke test. Automated tests
-never contact providers or a real vault.
+The current slice passes 110 Rust tests, seven Python fixture tests, formatting,
+workspace check/build, clippy with warnings denied and the synthetic process
+restart smoke check. These automated fixtures use isolated state and synthetic
+origins; they do not contact real providers or a vault.
 
-An explicit operator run separately verified installed 1Password CLI reads,
-Codex/GLM usage collection and one completed GLM Messages stream. A Codex token
-exchange reached the vault; a server-owned editor-metadata comparison caused the
-initial writeback result to fail closed. The comparison now allows that audit
-field to change, with synthetic regression coverage and an installed-CLI dry run.
-The stored bundle was manually reconciled against enrollment and a successful
-usage read; no second refresh exchange was issued. This does not establish an
-uninterrupted live refresh success path with the corrected adapter.
+Separate explicitly authorized live validation exercised installed 1Password CLI
+reads/writeback, Codex refresh and usage, GLM usage and a completed GLM Messages
+stream. Native Codex 0.153.4 then completed start and resume phases through the
+authenticated daemon: eight successful upstream attempts, four before a daemon
+restart and credential rotation and four afterward. Both phases executed native
+shell tools. The native thread, Poolparty binding and bound account stayed fixed
+while the credential generation advanced. See the
+[native validation fixture](native-codex.md) for its assertions and opt-in controls.
 
-Codex inference conformance remains open: one older-model request was explicitly
-rejected, and a separate current-model request returned HTTP 200 but no accepted
-stream bytes. Its attempt remains uncertain with capacity retained. Neither was
-automatically replayed. Private diagnostics and operator state remain outside this
-repository. This bounded validation is not full native-client, refresh crash,
-backup recovery or production deployment acceptance.
+The live Codex backend omitted `Content-Type` on valid SSE; the narrow adapter
+handling above enabled the stream without relaxing completion checks. Previously
+uncertain attempts stayed fenced and were never silently replayed or released.
+Final daemon checks also exercised account queries and binding inspection through
+the control helper, rejection of unauthenticated access and clean shutdown.
+
+Private account identities, vault references, prompts, responses, logs and state
+remain outside this repository. This bounded validation does not establish full
+native parity, real crash-during-refresh recovery, backup restoration or deployed
+service acceptance.

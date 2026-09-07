@@ -1,9 +1,9 @@
 # Credential maintenance and explicit provider checks
 
 These commands are experimental, one-shot operator operations. They use the real
-credential store and configured provider endpoints, then exit. There is no
-persistent production inference listener, periodic usage collector or refresh
-scheduler. The separate `--demo` server remains synthetic.
+credential store and configured provider endpoints, then exit. The separate
+[`--serve` daemon](daemon.md) maintains enrolled inventory and routes authenticated
+HTTP/SSE requests continuously. The `--demo` server remains synthetic.
 
 ## Commands and side effects
 
@@ -168,6 +168,12 @@ HTTP 401/403 produces an authentication-required observation; 429 is a collectio
 failure and never invented quota exhaustion.
 
 Kimi currently returns unsupported for account-usage collection. The existing
-transport foundation does not remove that collection gate. Full native-client
-continuation/compaction conformance, periodic maintenance, production routing,
-reconciliation tooling and backup recovery remain separate work.
+transport foundation does not remove that collection gate. The daemon now runs
+periodic maintenance and prepares credentials/usage before request admission.
+Native Codex HTTP start/tools/resume passed across restart and credential rotation;
+see [current validation](development.md#current-validation-evidence).
+
+WebSockets, compaction and broader native/provider conformance remain separate
+gates, alongside Kimi collection, complete PAYG admission, OIDC/workload grants,
+deployment, explicit reconciliation tooling and backup recovery. The successful
+native slice does not authorize automatic retry or clearing unresolved state.
