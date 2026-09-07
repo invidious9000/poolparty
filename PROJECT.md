@@ -8,7 +8,10 @@ workspaces, tool execution, conversations, and recovery decisions.
 ## Settled requirements
 
 - Separate public repository, independent of any one consumer or private estate.
-- Target Codex subscriptions and Chinese providers, initially Kimi, GLM, MiniMax.
+- Target Codex subscriptions and Chinese coding providers, initially Kimi and GLM.
+  MiniMax is a named future adapter option.
+- Chinese-provider coding plans are the initial account products. Metered API
+  products are separate future adapters, not automatic fallback capacity.
 - Retain Anthropic Messages compatibility for those providers; omit actual
   Anthropic/Claude integration and its account-specific machinery.
 - Preserve provider/account pins across session resume and quota exhaustion.
@@ -42,12 +45,14 @@ independent allocators against the same accounts and call that shared admission.
 - [Shared observability and portal integration](design/platform-integration.md)
 - [Consumer integration and CLI](design/consumers-and-cli.md)
 - [Delivery sequence and unresolved decisions](design/delivery-plan.md)
+- [Due diligence review and remaining gates](design/dd-review.md)
+- [Concurrency and admission](design/admission.md)
 - [Reference assessment](research/codex-lb.md)
 
 ## Current implementation state
 
-Only design and contributor documents exist. There are no credentials, model
-calls, deployed services, or changed consumers associated with this repository
-bootstrap. Validation consists of document/link checks and public-content review.
-Implementation will introduce pinned toolchains, lockfiles, meaningful tests,
-and build gates alongside the first executable slice.
+Design documents and isolated compatibility fixtures exist. Native-client probes
+use synthetic loopback origins and no provider credentials. There is no daemon,
+live model call, deployed service, or changed consumer. Validation and remaining
+gates are recorded in the DD reports. Application implementation will introduce
+pinned toolchains, lockfiles, domain tests, and build gates.

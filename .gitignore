@@ -24,4 +24,7 @@ credentials.json
 /target/
 /ui/node_modules/
 /ui/dist/
+# Local Python compatibility-fixture artifacts.
+__pycache__/
+*.pyc
 .DS_Store

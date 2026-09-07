@@ -35,7 +35,8 @@ and CI log must be suitable for unrestricted public disclosure.
 
 ## Product invariants
 
-- Support Codex subscription accounts and providers such as Kimi, GLM, and MiniMax.
+- Support Codex subscription accounts and Kimi/GLM coding plans, with MiniMax as a
+  future adapter option. Keep coding products separate from metered API products.
   Anthropic Messages is a supported protocol direction; actual Anthropic/Claude
   provider integration, subscription OAuth, Fable tracking, and its probes are
   excluded from this project scope.

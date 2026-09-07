@@ -1,6 +1,7 @@
 # Delivery plan
 
-Status: proposed sequence. This repository currently contains design only.
+Status: proposed sequence with completed source review and isolated compatibility
+spikes. See [DD review](dd-review.md) for executed evidence and remaining gates.
 
 ## 1. Resolve compatibility before broad implementation
 
@@ -74,9 +75,9 @@ own repository after the service contract is proven.
 
 | Decision | Current proposal | Evidence needed |
 | --- | --- | --- |
-| Extend codex-lb or build independently | Independent Rust application; selective reference/reuse | Transport spike and maintenance-cost assessment |
-| Exact first provider products | Codex subscriptions plus Kimi/GLM/MiniMax | Actual account products, entitlement, endpoint and quota behavior |
-| Binding carrier for each native client | Explicit control allocation and bound base URL | Native CLI/app-server tests, including subagents and resume |
+| Extend codex-lb or build independently | Independent Rust application; current egress crate reference-only | Source/API spike complete; Rust transport conformance remains |
+| Exact first provider products | Codex subscriptions plus Kimi/GLM coding plans; MiniMax future | Direction resolved; package-specific limits and live behavior remain |
+| Binding carrier for each native client | Explicit control allocation and bound base URL | Codex CLI/app-server fixture established core path; remaining native cases in DD reports |
 | Dashboard tooling | TypeScript/React/Vite embedded assets | First UI slice; no SSR requirement identified |
 | Credential persistence backend | Secret-store interface with one refresh authority | Vault write/rotation semantics and restore procedure |
 | Machine authentication | Scoped service grants; bearer compatibility where needed | Estate identity-provider and native-client capabilities |
@@ -86,3 +87,8 @@ own repository after the service contract is proven.
 
 No deployment, subscription purchase, credential migration, or consumer change is
 implied by accepting these design documents.
+
+Also test all [concurrency acceptance cases](admission.md), including shared
+credential ownership, cross-protocol caps, uncertain dispatch after restart, and
+native retries arriving through another transport. Binding idempotency alone does
+not deduplicate inference.

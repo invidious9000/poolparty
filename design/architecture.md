@@ -6,9 +6,11 @@ Status: proposed implementation; scope and session requirements are settled.
 
 Build an independent Rust service, `poolpartyd`, using Tokio and Axum. Use reqwest
 with rustls for ordinary upstream HTTP; choose the WebSocket transport after the
-Codex compatibility spike. Do not assume a generic WebSocket relay preserves every
-Codex transport behavior. Axum supplies the HTTP routing and streaming application
-shell ([crate documentation](https://docs.rs/axum/latest/axum/)).
+Codex compatibility gates. The [DD review](dd-review.md) recommends HTTP/SSE first
+because native WebSocket fallback can replay an uncertain request. Do not assume
+a generic relay preserves every Codex transport behavior. Axum supplies the HTTP
+routing and streaming application shell
+([crate documentation](https://docs.rs/axum/latest/axum/)).
 
 Build a small TypeScript/React/Vite dashboard into static assets served by the
 daemon. Node is a build dependency, not a production service. A separate Rust
@@ -33,7 +35,7 @@ flowchart LR
   Core --> DB[(Durable state)]
   Core --> Adapters[Provider adapters]
   Adapters --> Codex[Codex subscription upstream]
-  Adapters --> Others[Kimi / GLM / MiniMax]
+  Adapters --> Others[Kimi / GLM coding plans]
   Collect[Usage collection] --> Adapters
   Collect --> DB
 ```
@@ -90,6 +92,8 @@ never be advertised as lossless by default.
 ## Relationship to codex-lb
 
 Use [codex-lb as a reference](../research/codex-lb.md), not an initial fork or a
-second allocator behind Poolparty. Selective reuse of its Rust transport could
-save compatibility work. It must receive one concrete account/attempt and preserve
-Poolparty's cancellation and no-rebinding rules. No upstream code is included yet.
+second allocator behind Poolparty. The [egress spike](../research/egress-reuse-spike.md)
+found no typed public transport API at the pinned revision. Own a narrow interface
+receiving one concrete account/attempt, and selectively adapt transport code only
+after a demonstrated compatibility benefit. Preserve Poolparty's cancellation and
+no-rebinding rules. No upstream code is included yet.

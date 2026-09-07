@@ -7,6 +7,11 @@ Method: read-only source and documentation inspection. No upstream build, live
 account enrollment, inference probe, or performance benchmark was performed.
 No source code has been copied into Poolparty.
 
+Follow-up: the [egress API spike](egress-reuse-spike.md) found that the current
+Rust library exports a stdio runtime rather than a typed transport interface.
+Direct dependency adoption is therefore not the recommendation; use it as
+reference and consider selective adaptation after transport conformance tests.
+
 ## Observed structure
 
 The application combines a Python/FastAPI control plane, a React frontend, and a

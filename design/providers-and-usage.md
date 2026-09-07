@@ -1,6 +1,8 @@
 # Providers, credentials, and usage
 
-Status: provider direction is settled; adapter details require validation.
+Status: Codex subscriptions plus Kimi and GLM coding plans are settled;
+adapter details require validation. Metered API products are deferred and cannot
+serve as automatic paid overflow when a coding-plan window is exhausted.
 
 ## Provider boundary
 
@@ -9,7 +11,7 @@ Status: provider direction is settled; adapter details require validation.
 | Codex subscriptions | Native Codex backend Responses, including streaming and continuation | Validate account enrollment, refresh, usage, HTTP/SSE, WebSocket, compaction, and native CLI configuration |
 | Kimi | Anthropic Messages using the chosen product's endpoint and credentials | Published Kimi Code compatibility; distinguish membership from platform products |
 | GLM / Z.AI | Anthropic Messages; Chat Completions when a consumer requires it | Published coding-plan protocol endpoints; retain endpoint/product distinction |
-| MiniMax | Anthropic Messages | Published support has parameter and model-specific limits |
+| MiniMax | Future option, Anthropic Messages | Retain research; not a first-release integration gate |
 | Actual Anthropic | Excluded | No Claude subscription OAuth, Fable quota logic, or Claude monitoring probes |
 
 The public vendor evidence supports compatible interfaces, not identical feature
@@ -81,6 +83,11 @@ Do not clear a newer exhaustion signal with an older poll. Unknown/stale capacit
 policies should be explicit per pool, bounded, and visible in selection reasons.
 
 ## Allocation and accounting
+
+Respect applicable package concurrency limits separately from subscription quota
+windows. Keys sharing capacity share admission counters; metered API rate tables
+are not evidence of a coding-plan ceiling. See the [admission contract](admission.md)
+and [provider spike](../research/chinese-providers-spike.md).
 
 Selection filters hard requirements first and then scores eligible candidates
 using quota headroom and active pressure. Record exclusion reasons and the policy

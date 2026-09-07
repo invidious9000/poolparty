@@ -26,7 +26,8 @@ CLI support for headers, base URLs, config reload, compaction, and auxiliary mod
 calls differs by client version. Native sessions may spawn subagents; the initial
 safe policy keeps requests using a binding on its account. Separately allocatable
 child sessions require explicit child bindings. The relationship between native
-thread IDs and Poolparty logical sessions remains a compatibility-spike deliverable.
+thread IDs and Poolparty logical sessions is documented for a pinned version in
+the [Codex spike](../research/codex-spike.md). Do not generalize it to other versions.
 
 ## Proposed control API
 

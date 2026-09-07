@@ -28,7 +28,9 @@ Proposed lifecycle:
    creates with the same idempotency key and payload return the same result;
    conflicting intent returns a conflict.
 2. Admit: check the existing binding's eligibility and acquire request capacity.
-3. Complete/cancel/fail: settle that request's claim exactly once.
+3. Complete/cancel/fail: record the outcome exactly once. Release capacity on
+   confirmed completion/cancellation or proven pre-dispatch failure; retain
+   conservative pressure when upstream execution remains uncertain.
 4. Resume: retrieve the same binding and repeat admission against its account.
 5. Close: retire the session explicitly. Retain a tombstone according to a stated
    retention policy so closed sessions cannot accidentally be recreated.
@@ -43,9 +45,11 @@ resume handle fails explicitly. Replica replacement and request-lease expiry do
 not expire the binding. Retention must be visible to callers and backed by a
 defined export/restore policy.
 
-An explicit different model or provider on resume returns a conflict in the
-initial contract; callers start a new session. Future model-change operations
-would need an explicit contract and cannot weaken account affinity.
+An explicit different primary model or provider on resume returns a conflict;
+callers start a new session. A binding may declare a narrow auxiliary-model set
+for native helper operations, all on the same account. Those routes must be
+validated explicitly and cannot weaken a hard request model/effort constraint.
+Future primary-model changes need a separate explicit operation.
 
 ## Carrying the binding through native clients
 
@@ -71,8 +75,9 @@ carrier once tested. Do not put bearer tokens in URLs.
 An unbound compatibility route needs a validated native identity adapter or an
 explicit create operation. Never infer a logical session from a TCP connection,
 API key, prompt cache key, or undocumented interpretation of a process ID.
-Codex process-session, thread, turn, and response IDs may have different lifetimes.
-Their mappings are an integration spike, not interchangeable aliases.
+Codex process, session, thread, turn, and response IDs have distinct meanings.
+Their mappings are pinned in the [Codex spike](../research/codex-spike.md), with
+executed root resume cases and unexecuted child cases clearly distinguished.
 
 Native response IDs, file IDs, and conversation references must agree with the
 binding's upstream owner. Reject unknown or conflicting ownership rather than
@@ -99,6 +104,9 @@ Proposed canonical error (synthetic, returned through the control API):
 ```
 
 Use HTTP 429 for known quota exhaustion, with `Retry-After` only when justified.
+Return concurrency saturation separately as `session_concurrency_exhausted`;
+see [admission](admission.md). Native envelopes and client retry settings are
+versioned conformance requirements, not just an HTTP status mapping.
 Use a conflict for mismatched session intent, 404/410 for missing/retired bindings
 where appropriate, and 503 for temporary service/account unavailability. Distinct
 codes cover stale/unknown capacity, reauthentication, and unsupported capability.
@@ -113,6 +121,18 @@ Track dispatch certainty separately: `not_dispatched`, `dispatched`, or `unknown
 No automatic replay after partial output, tool effects, or ambiguous transmission.
 Any future same-account retry policy must prove replay safety, bound attempts, and
 preserve the binding. Infrastructure proxies must not retry inference POSTs.
+
+Session-creation idempotency does not deduplicate inference. Custom consumers
+should supply a scoped operation ID, distinct from a session ID and a transport
+attempt ID. Persist its dispatch outcome and reject conflicting reuse. Native
+operation carriers require validation before claiming equivalent deduplication;
+equal request bodies do not establish operation identity. When a native operation
+cannot be distinguished and its dispatch is uncertain, fail closed for new
+inference on that binding until reconciled or explicitly recovered by the caller.
+This restriction can temporarily block unrelated child work sharing the binding.
+Retry across transports still targets the same uncertainty record, never a new
+allocation. See the [Codex spike](../research/codex-spike.md) for a reproduced
+native WebSocket-to-HTTP fallback counterexample.
 
 `retry_at` is a best-known eligibility time, not a guarantee of future capacity.
 If multiple windows block admission, include all of them. Unknown reset times stay
