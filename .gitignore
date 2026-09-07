@@ -1,0 +1,27 @@
+# Local secrets and operator state never belong in this public repository.
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+auth.json
+credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.log
+/state/
+/secrets/
+/.private/
+/.local/
+/target/
+/ui/node_modules/
+/ui/dist/
+.DS_Store
