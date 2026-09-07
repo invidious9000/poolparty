@@ -1,6 +1,14 @@
 #![cfg(unix)]
 
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use poolparty::{
     domain::*,
@@ -17,7 +25,8 @@ root = pathlib.Path(__file__).resolve().parent
 mode = (root / 'mode').read_text()
 args = sys.argv[1:]
 assert args[:2] in [['item', 'get'], ['item', 'edit']]
-assert args[2:8] == ['item-a', '--vault', 'vault-a', '--format', 'json', '--reveal']
+assert args[2] in ['item-a', 'item-b']
+assert args[3:8] == ['--vault', 'vault-a', '--format', 'json', '--reveal']
 assert len(args) == 11 and args[8] == '--config' and args[10] == '--cache=false'
 config = pathlib.Path(args[9])
 assert config.is_absolute() and config.is_dir()
@@ -126,6 +135,20 @@ fn item() -> Value {
     })
 }
 impl Fixture {
+    fn cached(mut self, ttl: Duration) -> (Self, Arc<AtomicU64>) {
+        let seconds = Arc::new(AtomicU64::new(0));
+        let counter = seconds.clone();
+        let start = Instant::now();
+        self.store = self
+            .store
+            .with_read_cache(ttl)
+            .unwrap()
+            .with_cache_clock(Arc::new(move || {
+                start + Duration::from_secs(counter.load(Ordering::SeqCst))
+            }));
+        (self, seconds)
+    }
+
     fn new(mode: &str) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().canonicalize().unwrap();
@@ -173,6 +196,201 @@ impl Fixture {
         )
         .unwrap();
     }
+}
+
+#[tokio::test]
+async fn cached_latest_and_load_share_one_read_and_refresh_exactly_at_expiry() {
+    let (fixture, clock) = Fixture::new("normal").cached(Duration::from_secs(60));
+    let id = expected(7).id;
+    let (first, second) = tokio::join!(fixture.store.latest(&id), fixture.store.latest(&id));
+    assert_eq!(first.unwrap().0, expected(7));
+    assert_eq!(second.unwrap().0, expected(7));
+    for _ in 0..20 {
+        assert_eq!(fixture.store.latest(&id).await.unwrap().0, expected(7));
+        assert_eq!(
+            fixture.store.load(&expected(7)).await.unwrap().expose(),
+            "synthetic-old-credential"
+        );
+    }
+    assert_eq!(fixture.calls(), "get\n");
+    let mut changed = item();
+    changed["version"] = json!(8);
+    changed["fields"][0]["value"] = json!("synthetic-rotated-credential");
+    fixture.update(&changed);
+    clock.store(59, Ordering::SeqCst);
+    assert_eq!(fixture.store.latest(&id).await.unwrap().0, expected(7));
+    clock.store(60, Ordering::SeqCst);
+    let (reference, value) = fixture.store.latest(&id).await.unwrap();
+    assert_eq!(reference, expected(8));
+    assert_eq!(value.expose(), "synthetic-rotated-credential");
+    assert_eq!(fixture.calls(), "get\nget\n");
+    assert!(fixture.store.load(&expected(7)).await.is_err());
+    assert_eq!(fixture.calls(), "get\nget\n");
+    fixture.store.latest(&id).await.unwrap();
+    assert_eq!(fixture.calls(), "get\nget\n");
+}
+
+#[tokio::test]
+async fn newer_generation_load_bypasses_old_cached_value() {
+    let (fixture, _) = Fixture::new("normal").cached(Duration::from_secs(3600));
+    fixture.store.latest(&expected(7).id).await.unwrap();
+    let mut changed = item();
+    changed["version"] = json!(8);
+    changed["fields"][0]["value"] = json!("synthetic-newer-credential");
+    fixture.update(&changed);
+    assert_eq!(
+        fixture.store.load(&expected(8)).await.unwrap().expose(),
+        "synthetic-newer-credential"
+    );
+    assert_eq!(fixture.calls(), "get\nget\n");
+}
+
+#[tokio::test]
+async fn semantic_item_failure_is_backed_off_without_blocking_healthy_cached_credentials() {
+    let mut fixture = Fixture::new("normal");
+    let mut other = mapping();
+    other.credential = CredentialId::new("credential-b").unwrap();
+    other.item = "item-b".into();
+    let other_id = other.credential.clone();
+    fixture.store = OnePasswordStore::new(
+        vec![mapping(), other],
+        SecretValue::new("synthetic-service-token".into()),
+        fixture.path.join("mock-op"),
+    )
+    .unwrap()
+    .with_timeout(Duration::from_secs(2))
+    .unwrap();
+    let (fixture, _) = fixture.cached(Duration::from_secs(3600));
+    fixture.store.latest(&expected(7).id).await.unwrap();
+    // Synthetic executable returns item-a for item-b: CLI success, invalid identity.
+    assert!(fixture.store.latest(&other_id).await.is_err());
+    for _ in 0..10 {
+        fixture.store.latest(&expected(7).id).await.unwrap();
+        fixture.store.load(&expected(7)).await.unwrap();
+        assert!(fixture.store.latest(&other_id).await.is_err());
+    }
+    assert_eq!(fixture.calls(), "get\nget\n");
+}
+
+#[tokio::test]
+async fn vault_failure_blocks_all_accounts_and_cache_hits_until_fresh_recovery() {
+    let mut fixture = Fixture::new("normal");
+    let mut other = mapping();
+    other.credential = CredentialId::new("credential-b").unwrap();
+    other.item = "item-b".into();
+    let other_id = other.credential.clone();
+    fixture.store = OnePasswordStore::new(
+        vec![mapping(), other],
+        SecretValue::new("synthetic-service-token".into()),
+        fixture.path.join("mock-op"),
+    )
+    .unwrap()
+    .with_timeout(Duration::from_secs(2))
+    .unwrap();
+    let (fixture, clock) = fixture.cached(Duration::from_secs(3600));
+    fixture.store.latest(&expected(7).id).await.unwrap();
+    std::fs::write(fixture.path.join("mode"), "error").unwrap();
+    assert!(fixture.store.latest(&other_id).await.is_err());
+    assert_eq!(fixture.calls(), "get\nget\n");
+    std::fs::write(fixture.path.join("mode"), "normal").unwrap();
+    for _ in 0..10 {
+        assert!(fixture.store.latest(&expected(7).id).await.is_err());
+        assert!(fixture.store.load(&expected(7)).await.is_err());
+        assert!(fixture.store.latest(&other_id).await.is_err());
+    }
+    clock.store(899, Ordering::SeqCst);
+    assert!(fixture.store.latest(&expected(7).id).await.is_err());
+    assert_eq!(fixture.calls(), "get\nget\n");
+    clock.store(900, Ordering::SeqCst);
+    fixture.store.latest(&expected(7).id).await.unwrap();
+    // Cache is still within its hour, but recovery must first verify the vault.
+    assert_eq!(fixture.calls(), "get\nget\nget\n");
+    fixture.store.load(&expected(7)).await.unwrap();
+    assert_eq!(fixture.calls(), "get\nget\nget\n");
+}
+
+#[tokio::test]
+async fn expired_cache_never_serves_stale_secrets_and_failed_recovery_is_backed_off() {
+    let (fixture, clock) = Fixture::new("normal").cached(Duration::from_secs(1));
+    fixture.store.latest(&expected(7).id).await.unwrap();
+    clock.store(1, Ordering::SeqCst);
+    std::fs::write(fixture.path.join("mode"), "error").unwrap();
+    assert!(fixture.store.load(&expected(7)).await.is_err());
+    assert!(
+        fixture
+            .store
+            .replace(&expected(7), SecretValue::new("unused".into()))
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.calls(), "get\nget\n");
+    clock.store(901, Ordering::SeqCst);
+    assert!(fixture.store.latest(&expected(7).id).await.is_err());
+    assert_eq!(fixture.calls(), "get\nget\nget\n");
+    assert!(fixture.store.latest(&expected(7).id).await.is_err());
+    assert_eq!(fixture.calls(), "get\nget\nget\n");
+}
+
+#[tokio::test]
+async fn cached_replace_freshly_prechecks_edits_and_verifies_before_repopulating() {
+    let (fixture, _) = Fixture::new("normal").cached(Duration::from_secs(3600));
+    fixture.store.latest(&expected(7).id).await.unwrap();
+    let next = fixture
+        .store
+        .replace(
+            &expected(7),
+            SecretValue::new("synthetic-new-credential".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next, expected(8));
+    assert_eq!(fixture.calls(), "get\nget\nedit\nget\n");
+    assert_eq!(fixture.store.latest(&next.id).await.unwrap().0, next);
+    assert_eq!(
+        fixture.store.load(&next).await.unwrap().expose(),
+        "synthetic-new-credential"
+    );
+    assert_eq!(fixture.calls(), "get\nget\nedit\nget\n");
+}
+
+#[tokio::test]
+async fn ambiguous_cached_replace_evicts_secret_and_preserves_observed_generation() {
+    let (fixture, clock) = Fixture::new("version-interference").cached(Duration::from_secs(3600));
+    fixture.store.latest(&expected(7).id).await.unwrap();
+    assert!(
+        fixture
+            .store
+            .replace(
+                &expected(7),
+                SecretValue::new("synthetic-new-credential".into())
+            )
+            .await
+            .is_err()
+    );
+    assert!(fixture.store.latest(&expected(7).id).await.is_err());
+    assert_eq!(fixture.calls(), "get\nget\nedit\n");
+    fixture.update(&item());
+    clock.store(900, Ordering::SeqCst);
+    assert!(fixture.store.latest(&expected(7).id).await.is_err());
+    assert_eq!(fixture.calls(), "get\nget\nedit\nget\n");
+    let mut recovered = item();
+    recovered["version"] = json!(9);
+    recovered["fields"][0]["value"] = json!("synthetic-reconciled-credential");
+    fixture.update(&recovered);
+    clock.store(1800, Ordering::SeqCst);
+    let (reference, value) = fixture.store.latest(&expected(7).id).await.unwrap();
+    assert_eq!(reference, expected(9));
+    assert_eq!(value.expose(), "synthetic-reconciled-credential");
+}
+
+#[tokio::test]
+async fn uncached_store_keeps_fresh_reads_and_no_failure_backoff() {
+    let fixture = Fixture::new("error");
+    assert!(fixture.store.latest(&expected(7).id).await.is_err());
+    std::fs::write(fixture.path.join("mode"), "normal").unwrap();
+    fixture.store.latest(&expected(7).id).await.unwrap();
+    fixture.store.load(&expected(7)).await.unwrap();
+    assert_eq!(fixture.calls(), "get\nget\nget\n");
 }
 
 #[tokio::test]
@@ -431,4 +649,12 @@ fn mappings_require_unique_items_and_credentials_and_trusted_executable_paths() 
     invalid.item = "--assignment=secret".into();
     assert!(OnePasswordStore::new(vec![invalid], token(), path()).is_err());
     assert!(OnePasswordStore::new(vec![mapping()], token(), PathBuf::from("op")).is_err());
+    for ttl in [Duration::ZERO, Duration::from_secs(3601)] {
+        assert!(
+            OnePasswordStore::new(vec![mapping()], token(), path())
+                .unwrap()
+                .with_read_cache(ttl)
+                .is_err()
+        );
+    }
 }

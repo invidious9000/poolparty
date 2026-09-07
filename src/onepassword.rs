@@ -7,7 +7,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     process::Stdio,
-    time::Duration,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -26,6 +27,21 @@ use crate::{
 
 const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const STDERR_LIMIT: usize = 64 * 1024;
+const READ_FAILURE_BACKOFF: Duration = Duration::from_secs(15 * 60);
+
+struct CachedCredential {
+    generation: u64,
+    value: SecretValue,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+struct StoreState {
+    versions: BTreeMap<CredentialId, u64>,
+    cache: BTreeMap<CredentialId, CachedCredential>,
+    blocked_until: Option<Instant>,
+    credential_blocked_until: BTreeMap<CredentialId, Instant>,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,7 +57,9 @@ pub struct OnePasswordStore {
     service_token: SecretValue,
     executable: PathBuf,
     timeout: Duration,
-    versions: Mutex<BTreeMap<CredentialId, u64>>,
+    state: Mutex<StoreState>,
+    cache_ttl: Option<Duration>,
+    cache_clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
 fn failure() -> Error {
@@ -99,7 +117,9 @@ impl OnePasswordStore {
             service_token,
             executable,
             timeout: Duration::from_secs(20),
-            versions: Mutex::new(BTreeMap::new()),
+            state: Mutex::new(StoreState::default()),
+            cache_ttl: None,
+            cache_clock: Arc::new(Instant::now),
         })
     }
 
@@ -113,6 +133,91 @@ impl OnePasswordStore {
         }
         self.timeout = timeout;
         Ok(self)
+    }
+
+    /// Opt into process-only read caching and a global vault failure backoff.
+    /// Uncached construction retains fresh CLI reads for one-shot maintenance.
+    pub fn with_read_cache(mut self, ttl: Duration) -> Result<Self> {
+        if ttl.is_zero() || ttl > Duration::from_secs(3600) {
+            return Err(Error::new(
+                ErrorCode::InvalidInput,
+                "credential read cache TTL must be greater than zero and at most one hour",
+            ));
+        }
+        self.cache_ttl = Some(ttl);
+        Ok(self)
+    }
+
+    /// Inject a monotonic clock before sharing the store, for deterministic tests.
+    pub fn with_cache_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        self.cache_clock = clock;
+        self
+    }
+
+    fn check_backoff(&self, state: &StoreState, id: &CredentialId) -> Result<()> {
+        if state
+            .blocked_until
+            .is_some_and(|until| (self.cache_clock)() < until)
+            || state
+                .credential_blocked_until
+                .get(id)
+                .is_some_and(|until| (self.cache_clock)() < *until)
+        {
+            return Err(failure());
+        }
+        Ok(())
+    }
+
+    fn record_failure(&self, state: &mut StoreState, id: &CredentialId, global: bool) {
+        state.cache.remove(id);
+        if self.cache_ttl.is_some()
+            && let Some(until) = (self.cache_clock)().checked_add(READ_FAILURE_BACKOFF)
+        {
+            if global {
+                state.blocked_until = Some(until);
+            } else {
+                state.credential_blocked_until.insert(id.clone(), until);
+            }
+        }
+    }
+
+    fn cache_value(&self, state: &mut StoreState, id: &CredentialId, generation: u64, value: &str) {
+        if let Some(expires_at) = self
+            .cache_ttl
+            .and_then(|ttl| (self.cache_clock)().checked_add(ttl))
+        {
+            state.cache.insert(
+                id.clone(),
+                CachedCredential {
+                    generation,
+                    value: SecretValue::new(value.to_owned()),
+                    expires_at,
+                },
+            );
+        }
+    }
+
+    async fn cached_or_read(
+        &self,
+        mapping: &VaultField,
+        state: &mut StoreState,
+    ) -> Result<(u64, SecretValue)> {
+        // A known vault outage must also stop cached expiring credentials from
+        // initiating an OAuth exchange whose writeback is already known to fail.
+        self.check_backoff(state, &mapping.credential)?;
+        if let Some(cached) = state.cache.get(&mapping.credential)
+            && state.blocked_until.is_none()
+            && (self.cache_clock)() < cached.expires_at
+            && state.versions.get(&mapping.credential) == Some(&cached.generation)
+        {
+            return Ok((
+                cached.generation,
+                SecretValue::new(cached.value.expose().to_owned()),
+            ));
+        }
+        let (_, generation, value) = self.read(mapping, state).await?;
+        self.cache_value(state, &mapping.credential, generation, &value);
+        Ok((generation, SecretValue::new(value)))
     }
 
     pub async fn latest(&self, id: &CredentialId) -> Result<(CredentialRef, SecretValue)> {
@@ -207,18 +312,40 @@ impl OnePasswordStore {
     async fn read(
         &self,
         mapping: &VaultField,
-        versions: &mut BTreeMap<CredentialId, u64>,
+        state: &mut StoreState,
     ) -> Result<(Value, u64, String)> {
-        let item = self.invoke(mapping, None).await?;
-        let (generation, value) = inspect(&item, mapping)?;
-        if versions
-            .get(&mapping.credential)
-            .is_some_and(|previous| generation < *previous)
-        {
-            return Err(conflict());
+        self.check_backoff(state, &mapping.credential)?;
+        state.cache.remove(&mapping.credential);
+        let item = match self.invoke(mapping, None).await {
+            Ok(item) => item,
+            Err(error) => {
+                self.record_failure(state, &mapping.credential, true);
+                return Err(error);
+            }
+        };
+        // A successful CLI call proves service recovery independently of whether
+        // this particular credential item's shape/generation is usable.
+        state.blocked_until = None;
+        let result = (|| {
+            let (generation, value) = inspect(&item, mapping)?;
+            if state
+                .versions
+                .get(&mapping.credential)
+                .is_some_and(|previous| generation < *previous)
+            {
+                return Err(conflict());
+            }
+            state
+                .versions
+                .insert(mapping.credential.clone(), generation);
+            Ok((item, generation, value))
+        })();
+        if result.is_err() {
+            self.record_failure(state, &mapping.credential, false);
+        } else {
+            state.credential_blocked_until.remove(&mapping.credential);
         }
-        versions.insert(mapping.credential.clone(), generation);
-        Ok((item, generation, value))
+        result
     }
 }
 
@@ -344,14 +471,14 @@ fn normalized(mut item: Value) -> Result<Value> {
 #[async_trait]
 impl VersionedCredentialStore for OnePasswordStore {
     async fn latest(&self, id: &CredentialId) -> Result<(CredentialRef, SecretValue)> {
-        let mut versions = self.versions.lock().await;
-        let (_, generation, value) = self.read(self.field(id)?, &mut versions).await?;
+        let mut state = self.state.lock().await;
+        let (generation, value) = self.cached_or_read(self.field(id)?, &mut state).await?;
         Ok((
             CredentialRef {
                 id: id.clone(),
                 generation,
             },
-            SecretValue::new(value),
+            value,
         ))
     }
 }
@@ -359,70 +486,112 @@ impl VersionedCredentialStore for OnePasswordStore {
 #[async_trait]
 impl CredentialStore for OnePasswordStore {
     async fn load(&self, reference: &CredentialRef) -> Result<SecretValue> {
-        let mut versions = self.versions.lock().await;
-        let (_, generation, value) = self.read(self.field(&reference.id)?, &mut versions).await?;
-        if generation != reference.generation {
+        let mut state = self.state.lock().await;
+        if self.cache_ttl.is_some()
+            && state
+                .versions
+                .get(&reference.id)
+                .is_some_and(|generation| reference.generation < *generation)
+        {
             return Err(conflict());
         }
-        Ok(SecretValue::new(value))
+        if state
+            .cache
+            .get(&reference.id)
+            .is_some_and(|cached| cached.generation != reference.generation)
+        {
+            state.cache.remove(&reference.id);
+        }
+        let (generation, value) = self
+            .cached_or_read(self.field(&reference.id)?, &mut state)
+            .await?;
+        if generation != reference.generation {
+            state.cache.remove(&reference.id);
+            return Err(conflict());
+        }
+        Ok(value)
     }
 
     async fn replace(&self, expected: &CredentialRef, next: SecretValue) -> Result<CredentialRef> {
         if next.expose().is_empty() {
             return Err(failure());
         }
-        let mut versions = self.versions.lock().await;
+        let mut state = self.state.lock().await;
+        state.cache.remove(&expected.id);
+        self.check_backoff(&state, &expected.id)?;
         let mapping = self.field(&expected.id)?;
-        let (mut item, generation, _) = self.read(mapping, &mut versions).await?;
-        if generation != expected.generation {
-            return Err(conflict());
+        let result = async {
+            let (mut item, generation, _) = self.read(mapping, &mut state).await?;
+            if generation != expected.generation {
+                return Err(conflict());
+            }
+            if unsupported_content(&item) {
+                return Err(Error::new(
+                    ErrorCode::Unsupported,
+                    "credential item contains content unsupported by JSON updates",
+                ));
+            }
+            let next_generation = generation.checked_add(1).ok_or_else(conflict)?;
+            let fields = item
+                .get_mut("fields")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(failure)?;
+            // Empty DATE fields can otherwise become zero dates during a CLI round trip.
+            fields.retain(|field| !empty_date(field));
+            let target = fields
+                .iter_mut()
+                .find(|field| {
+                    field.get("id").and_then(Value::as_str) == Some(mapping.field.as_str())
+                })
+                .ok_or_else(failure)?;
+            target
+                .as_object_mut()
+                .ok_or_else(failure)?
+                .insert("value".into(), Value::String(next.expose().to_owned()));
+            let expected_item = normalized(item.clone())?;
+            let edited = match self
+                .invoke(
+                    mapping,
+                    Some(serde_json::to_vec(&item).map_err(|_| failure())?),
+                )
+                .await
+            {
+                Ok(edited) => edited,
+                Err(error) => {
+                    self.record_failure(&mut state, &expected.id, true);
+                    return Err(error);
+                }
+            };
+            let (edited_generation, edited_value) = inspect(&edited, mapping)?;
+            state
+                .versions
+                .entry(expected.id.clone())
+                .and_modify(|generation| *generation = (*generation).max(edited_generation))
+                .or_insert(edited_generation);
+            if edited_generation != next_generation
+                || edited_value != next.expose()
+                || normalized(edited)? != expected_item
+            {
+                return Err(conflict());
+            }
+            let (readback, readback_generation, readback_value) =
+                self.read(mapping, &mut state).await?;
+            if readback_generation != next_generation
+                || readback_value != next.expose()
+                || normalized(readback)? != expected_item
+            {
+                return Err(conflict());
+            }
+            self.cache_value(&mut state, &expected.id, next_generation, &readback_value);
+            Ok(CredentialRef {
+                id: expected.id.clone(),
+                generation: next_generation,
+            })
         }
-        if unsupported_content(&item) {
-            return Err(Error::new(
-                ErrorCode::Unsupported,
-                "credential item contains content unsupported by JSON updates",
-            ));
+        .await;
+        if result.is_err() {
+            self.record_failure(&mut state, &expected.id, false);
         }
-        let next_generation = generation.checked_add(1).ok_or_else(conflict)?;
-        let fields = item
-            .get_mut("fields")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(failure)?;
-        // Empty DATE fields can otherwise become zero dates during a CLI round trip.
-        fields.retain(|field| !empty_date(field));
-        let target = fields
-            .iter_mut()
-            .find(|field| field.get("id").and_then(Value::as_str) == Some(mapping.field.as_str()))
-            .ok_or_else(failure)?;
-        target
-            .as_object_mut()
-            .ok_or_else(failure)?
-            .insert("value".into(), Value::String(next.expose().to_owned()));
-        let expected_item = normalized(item.clone())?;
-        let edited = self
-            .invoke(
-                mapping,
-                Some(serde_json::to_vec(&item).map_err(|_| failure())?),
-            )
-            .await?;
-        let (edited_generation, edited_value) = inspect(&edited, mapping)?;
-        if edited_generation != next_generation
-            || edited_value != next.expose()
-            || normalized(edited)? != expected_item
-        {
-            return Err(conflict());
-        }
-        let (readback, readback_generation, readback_value) =
-            self.read(mapping, &mut versions).await?;
-        if readback_generation != next_generation
-            || readback_value != next.expose()
-            || normalized(readback)? != expected_item
-        {
-            return Err(conflict());
-        }
-        Ok(CredentialRef {
-            id: expected.id.clone(),
-            generation: next_generation,
-        })
+        result
     }
 }

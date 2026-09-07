@@ -155,11 +155,14 @@ pub async fn run(config: ServeConfig, service_token: SecretValue) -> Result<()> 
     }
     let mapped = validate_inventory(&config.inventory)?;
     let (usage_endpoints, inference_endpoints) = inventory_endpoints(&config.inventory.accounts)?;
-    let store = Arc::new(OnePasswordStore::new(
-        config.inventory.credentials.clone(),
-        service_token,
-        config.inventory.op_executable.clone(),
-    )?);
+    let store = Arc::new(
+        OnePasswordStore::new(
+            config.inventory.credentials.clone(),
+            service_token,
+            config.inventory.op_executable.clone(),
+        )?
+        .with_read_cache(Duration::from_secs(3600))?,
+    );
     let refresher = Arc::new(CodexRefresher::new(
         config.inventory.oauth.endpoint.clone(),
         config.inventory.oauth.client_id.clone(),
