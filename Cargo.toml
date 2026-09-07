@@ -1,0 +1,37 @@
+[workspace]
+members = ["."]
+resolver = "3"
+
+[package]
+name = "poolparty"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+description = "Provider routing with durable account affinity and conservative admission"
+
+[[bin]]
+name = "poolpartyd"
+path = "src/main.rs"
+
+[dependencies]
+async-stream = "0.3"
+async-trait = "0.1"
+axum = "0.8"
+bytes = "1"
+fs2 = "0.4"
+futures-core = "0.3"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net", "signal", "time", "fs"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

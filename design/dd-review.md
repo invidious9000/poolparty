@@ -95,12 +95,13 @@ that evidence.
 
 ## Next bounded implementation slice
 
-Build the durable binding and admission domain with synthetic accounts, a SQLite
-store, and fake-clock/fake-origin tests. Expose create/inspect/admit/settle through
-the control API, plus a minimal HTTP/SSE route receiving a scoped caller grant.
-Keep one prepared upstream attempt and explicit dispatch certainty in the
-transport interface. Implement the acceptance cases in [delivery plan](delivery-plan.md)
-and [admission](admission.md) before adding credential-bearing adapters.
+The first [core implementation](core-implementation.md) now provides durable
+bindings/admission, SQLite storage, fake-clock/fake-origin tests, authenticated
+create/inspect/close routes and a minimal HTTP/SSE path. Admission and settlement
+remain internal application operations, not caller-authorized state overrides.
+The transport interface owns one prepared upstream attempt and explicit dispatch
+certainty. See [development](../docs/development.md) for runnable verification and
+remaining limitations, including model-specific caps and PAYG reservations.
 
 Then exercise one Codex account and one Messages coding-plan account with a
 bounded live checklist: status/usage read, tiny streamed response, tool round-trip,

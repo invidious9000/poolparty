@@ -71,3 +71,13 @@ and CI log must be suitable for unrestricted public disclosure.
   Do not invent build/test success for a daemon that does not yet exist.
 
 `AGENTS.md` is canonical; `CLAUDE.md` is only a pointer to it.
+
+## Rust implementation
+
+- Use `rust-toolchain.toml` and the committed `Cargo.lock`. Formatting is
+  `cargo fmt --all`; verification is workspace-scoped check, nextest and clippy
+  with `--locked`. Commands and acceptance limits live in `docs/development.md`.
+- Keep domain/port changes coordinated across modules. Adapter existence does
+  not establish live provider conformance or entitlement.
+- Tests use synthetic values and isolated, canonicalized temporary directories.
+  Never read an operator auth store or call a live provider from automated tests.

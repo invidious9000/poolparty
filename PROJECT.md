@@ -54,8 +54,14 @@ independent allocators against the same accounts and call that shared admission.
 
 ## Current implementation state
 
-Design documents and isolated compatibility fixtures exist. Native-client probes
-use synthetic loopback origins and no provider credentials. There is no daemon,
-live model call, deployed service, or changed consumer. Validation and remaining
-gates are recorded in the DD reports. Application implementation will introduce
-pinned toolchains, lockfiles, domain tests, and build gates.
+The first Rust core exists: typed domain/adapter contracts, SQLite ledger,
+conservative admission and recovery, authenticated HTTP control/model routes,
+synthetic transport and configured HTTP/SSE transport foundations. A loopback-only
+`poolpartyd --demo` executable exercises the lifecycle without provider access.
+Pinned tooling, a lockfile, synthetic acceptance tests and a process restart smoke
+check are included. See [development](docs/development.md) for commands and limits.
+
+Production credential/usage adapters, live conformance, complete PAYG accounting,
+OIDC/workload identity lifecycle, dashboard and deployment remain separate gates.
+No existing consumer has changed. Module boundaries are recorded in
+[core implementation](design/core-implementation.md).
