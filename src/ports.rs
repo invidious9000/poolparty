@@ -7,6 +7,13 @@ use std::{fmt, pin::Pin};
 
 #[async_trait]
 pub trait Ledger: Send + Sync {
+    /// Verify a local transaction and schema read without provider operations.
+    async fn check_ready(&self) -> Result<()>;
+    /// Fence removed enrollments while preserving existing account/session records.
+    async fn disable_unenrolled(
+        &self,
+        enrolled: &std::collections::BTreeSet<AccountId>,
+    ) -> Result<()>;
     /// Return only authorized accounts and their visible pool memberships.
     async fn accounts(&self, principal: &Principal) -> Result<Vec<Account>>;
     async fn set_account_enabled(&self, id: &AccountId, enabled: bool) -> Result<()>;

@@ -191,6 +191,7 @@ async fn persistent_http_serves_authenticated_binding_stream_and_releases_state_
         async {
             let _ = stopped.await;
         },
+        None,
     ));
     drop(state);
     assert!(StateDirectory::acquire(&path).is_err());
@@ -256,6 +257,7 @@ async fn periodic_failure_does_not_stop_listener_and_shutdown_stops_future_ticks
         async {
             let _ = stopped.await;
         },
+        None,
     ));
     tokio::time::timeout(Duration::from_secs(2), maintenance.entered.notified())
         .await
@@ -290,6 +292,7 @@ async fn shutdown_has_a_bound_when_background_work_is_stuck() {
         async {
             let _ = stopped.await;
         },
+        None,
     ));
     tokio::time::timeout(Duration::from_secs(2), maintenance.entered.notified())
         .await

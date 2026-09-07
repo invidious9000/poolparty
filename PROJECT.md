@@ -23,7 +23,8 @@ workspaces, tool execution, conversations, and recovery decisions.
 
 ## Technology and remaining defaults
 
-The runtime and SQLite choices underpin the experimental daemon. Deployment, UI
+The runtime and SQLite choices underpin the experimental daemon. A pinned amd64
+container recipe is included. Deployment, UI
 and a packaged Rust control client remain proposals; a Python standard-library
 control helper is implemented.
 

@@ -12,10 +12,13 @@ use uuid::Uuid;
 
 use crate::{domain::*, ports::Ledger};
 
+const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub struct SqliteLedger {
     connection: Arc<Mutex<Connection>>,
     ownership: Option<Arc<dyn Send + Sync>>,
+    probe_gate: Arc<tokio::sync::Semaphore>,
 }
 
 fn unavailable() -> Error {
@@ -57,7 +60,7 @@ impl SqliteLedger {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let connection = Connection::open(path).map_err(|_| unavailable())?;
         connection
-            .busy_timeout(Duration::from_secs(5))
+            .busy_timeout(DATABASE_BUSY_TIMEOUT)
             .map_err(|_| unavailable())?;
         connection
             .execute_batch(
@@ -91,6 +94,7 @@ impl SqliteLedger {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             ownership: None,
+            probe_gate: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
 
@@ -116,6 +120,26 @@ impl SqliteLedger {
         let _ownership = &self.ownership;
         let mut db = self.connection.lock().map_err(|_| unavailable())?;
         operation(&mut db)
+    }
+
+    fn probe_blocking(&self) -> Result<()> {
+        let mut db = self.connection.try_lock().map_err(|_| unavailable())?;
+        db.busy_timeout(Duration::ZERO).map_err(|_| unavailable())?;
+        let result = (|| {
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| unavailable())?;
+            let _: u64 = tx
+                .query_row("SELECT count(*) FROM accounts", [], |row| row.get(0))
+                .map_err(|_| unavailable())?;
+            tx.rollback().map_err(|_| unavailable())
+        })();
+        // Restore the normal contention policy on success and every SQL error.
+        let restored = db
+            .busy_timeout(DATABASE_BUSY_TIMEOUT)
+            .map_err(|_| unavailable());
+        restored?;
+        result
     }
 }
 
@@ -282,6 +306,48 @@ fn advance(
 
 #[async_trait]
 impl Ledger for SqliteLedger {
+    async fn check_ready(&self) -> Result<()> {
+        // A timed-out HTTP waiter cannot release this permit while its blocking
+        // worker remains scheduled. Additional probes fail without queuing workers.
+        let permit = self
+            .probe_gate
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| unavailable())?;
+        let ledger = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            ledger.probe_blocking()
+        })
+        .await
+        .map_err(|_| unavailable())?
+    }
+
+    async fn disable_unenrolled(
+        &self,
+        enrolled: &std::collections::BTreeSet<AccountId>,
+    ) -> Result<()> {
+        let enrolled = enrolled.clone();
+        self.run(move |db| {
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| unavailable())?;
+            let accounts: Vec<Account> = all(&tx, "SELECT data FROM accounts", [])?;
+            for mut account in accounts {
+                if account.enabled && !enrolled.contains(&account.id) {
+                    account.enabled = false;
+                    tx.execute(
+                        "UPDATE accounts SET data=?2 WHERE id=?1",
+                        params![account.id.as_str(), encode(&account)?],
+                    )
+                    .map_err(|_| unavailable())?;
+                }
+            }
+            tx.commit().map_err(|_| unavailable())
+        })
+        .await
+    }
+
     async fn accounts(&self, principal: &Principal) -> Result<Vec<Account>> {
         let principal = principal.clone();
         self.run(move |db| {
@@ -766,5 +832,69 @@ mod ownership_tests {
             .query_row("SELECT count(*) FROM ownership_probe", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 1);
+    }
+
+    async fn overlapping_probes_fail_promptly(ledger: &SqliteLedger) {
+        let mut probes = Vec::new();
+        for _ in 0..24 {
+            let ledger = ledger.clone();
+            probes.push(tokio::spawn(async move { ledger.check_ready().await }));
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            for probe in probes {
+                assert!(probe.await.unwrap().is_err());
+            }
+        })
+        .await
+        .expect("readiness probes must not wait behind database work");
+    }
+
+    #[tokio::test]
+    async fn overlapping_readiness_probes_do_not_queue_behind_mutex_or_sqlite_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("ledger.sqlite");
+        let ledger = SqliteLedger::open(&path).unwrap();
+        let worker = ledger.clone();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let holding_mutex = tokio::spawn(async move {
+            worker
+                .run(move |_| {
+                    let _ = entered.send(());
+                    released.recv().map_err(|_| unavailable())?;
+                    Ok(())
+                })
+                .await
+        });
+        started.await.unwrap();
+        overlapping_probes_fail_promptly(&ledger).await;
+        release.send(()).unwrap();
+        holding_mutex.await.unwrap().unwrap();
+
+        let other = Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        overlapping_probes_fail_promptly(&ledger).await;
+        let busy_timeout: u64 = ledger
+            .run(|db| {
+                db.query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                    .map_err(|_| unavailable())
+            })
+            .await
+            .unwrap();
+        assert_eq!(busy_timeout, 5000);
+        other.execute_batch("ROLLBACK").unwrap();
+        ledger.check_ready().await.unwrap();
+        let busy_timeout: u64 = ledger
+            .run(|db| {
+                db.query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                    .map_err(|_| unavailable())
+            })
+            .await
+            .unwrap();
+        assert_eq!(busy_timeout, 5000);
     }
 }

@@ -23,6 +23,7 @@ integration.
 
 - [Build, test, run the demo and current limitations](docs/development.md)
 - [Run the authenticated daemon and control helper](docs/daemon.md)
+- [Container build and runtime contract](docs/container.md)
 - [Native Codex start/resume validation](docs/native-codex.md)
 - [Credential maintenance, usage checks and explicit probes](docs/credential-maintenance.md)
 - [1Password storage and exclusive writer requirements](docs/onepassword.md)

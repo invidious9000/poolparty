@@ -112,9 +112,16 @@ remote model discovery and nonstreaming inference return unsupported. No dashboa
 production deployment or consumer integration is included. Cerebras/OpenRouter
 and MiniMax remain future options.
 
+## Container packaging
+
+The pinned amd64 Dockerfile and runtime filesystem contract are described in
+[container operations](container.md). The daemon exposes a separate local readiness
+check and disables accounts removed from enrollment without deleting their bindings.
+Container builds and deployed ingress checks are separate from the local test suite.
+
 ## Current validation evidence
 
-The current slice passes 110 Rust tests, seven Python fixture tests, formatting,
+The current slice passes 115 Rust tests, seven Python fixture tests, formatting,
 workspace check/build, clippy with warnings denied and the synthetic process
 restart smoke check. These automated fixtures use isolated state and synthetic
 origins; they do not contact real providers or a vault.

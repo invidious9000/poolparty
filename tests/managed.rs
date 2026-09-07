@@ -515,3 +515,56 @@ async fn response_and_detached_settlement_retain_router_ownership() {
         AttemptState::Uncertain
     );
 }
+
+#[tokio::test]
+async fn removed_enrollments_stop_competing_for_new_bindings_without_erasing_old_affinity() {
+    let fixture = Fixture::new();
+    let original = fixture.inventory(vec![enrollment("a"), enrollment("b")]);
+    original.sync_all().await.unwrap();
+    let existing = fixture.binding("old-session", "account-a").await.unwrap();
+    drop(original);
+    let remaining = fixture.inventory(vec![enrollment("b")]);
+    remaining.sync_all().await.unwrap();
+    let fresh = fixture
+        .ledger
+        .create_binding(
+            &fixture.principal(),
+            CreateBinding {
+                session: ClientSessionId::new("new-session").unwrap(),
+                pool: PoolId::new("pool-a").unwrap(),
+                product: Product::CodexSubscription,
+                model: "model-a".into(),
+                account: None,
+                effort: None,
+            },
+            fixture.clock.now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fresh.account.as_str(), "account-b");
+    assert_eq!(
+        fixture
+            .ledger
+            .binding(&fixture.principal(), &existing.id)
+            .await
+            .unwrap(),
+        existing
+    );
+    assert_eq!(
+        remaining.prepare(&existing).await.unwrap_err().code,
+        ErrorCode::NoEligibleAccount
+    );
+    assert_eq!(
+        fixture.admit(&existing).await.unwrap_err().code,
+        ErrorCode::NoEligibleAccount
+    );
+    let reopened = SqliteLedger::open(&fixture.state.database).unwrap();
+    let accounts = reopened.accounts(&fixture.principal()).await.unwrap();
+    assert!(
+        !accounts
+            .iter()
+            .find(|account| account.id.as_str() == "account-a")
+            .unwrap()
+            .enabled
+    );
+}

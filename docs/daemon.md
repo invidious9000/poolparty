@@ -139,8 +139,24 @@ returns the stored conflict/outcome information and never replays inference.
 The response's `x-poolparty-attempt-id` correlates its durable state. Binding
 possession never replaces principal and pool authorization.
 
-`GET /healthz` is an unauthenticated, nonsecret process-liveness response. Account
-eligibility is established by admission and usage observations, not by liveness.
+`GET /healthz` is an unauthenticated, nonsecret process-liveness response.
+The persistent daemon also exposes `GET /readyz`: HTTP 200 with
+`{"status":"ready"}` after startup finishes, or HTTP 503 with
+`{"status":"not_ready"}` while unready. Readiness requires the service to be
+serving and a local SQLite transaction/schema check to finish within 250 ms.
+Only one probe worker can be outstanding, including after its HTTP waiter times
+out. Probes acquire the local connection without waiting and use a zero SQLite
+busy timeout, so overlapping probes fail promptly instead of queuing behind
+inference or maintenance writes. Normal database operations retain their usual
+contention timeout.
+It becomes false before graceful drain and when the service future is cancelled.
+Responses contain no account information and use `Cache-Control: no-store`.
+
+Readiness does not contact the vault or providers and does not depend on available
+quota. Exhausted or unavailable accounts remain inspectable through the
+authenticated control API. The check establishes local transaction availability;
+it does not certify a future write against disk exhaustion. Account eligibility
+is established by admission and usage observations.
 Exhaustion, credential faults and uncertain attempts preserve the binding; the
 caller chooses whether to wait or create a new logical session.
 
@@ -154,17 +170,39 @@ serving. Upstream credential or collection failures are reported as sanitized
 codes while healthy enrollment remains available and affected credentials stay
 fenced. Invalid configuration or storage failures stop startup. Later maintenance
 failures likewise leave request preparation and admission responsible for health.
+Persisted accounts removed from the configured inventory are disabled before
+synchronization. Their existing bindings remain recorded and cannot silently move
+to another account; fresh bindings select from the current enrollment.
 
 The state directory must remain private and durable. The same directory is
 exclusive across `--serve`, `--check`, `--probe` and `--refresh`; those commands
 cannot concurrently operate against a running daemon's state. Never use another
 directory to bypass the owner lock for the same provider credentials.
 
+For a nonroot container, the configured state directory must be writable by its
+runtime UID and have mode 0700. A mounted volume replaces image-layer permissions:
+prepare the volume ownership explicitly, or configure a private child directory
+under a writable mount and let the process create that child. The daemon does not
+change permissions on an existing volume root. Group-writable mode 0770 on the
+configured state directory is rejected; group access to a parent mount is fine.
+Keep the state volume writable when using a read-only root filesystem, and provide
+a writable temporary directory for the CLI. Never put tokens in image layers.
+
+Container probes should use `/healthz` for liveness and `/readyz` for readiness.
+Allow startup to finish initial inventory checks before restarting an unresponsive
+container: account preparation has a 120-second deadline per account and visits
+accounts sequentially. Size the startup-probe budget for the enrolled inventory
+and expected vault/provider latency. The HTTP listener begins serving after these
+checks; neither health endpoint responds during that initialization phase.
+
 SIGINT and SIGTERM stop new HTTP acceptance and request a graceful drain. HTTP
 requests and background maintenance share a 30-second drain deadline. Exceeding
 that bound exits with an error; startup recovery preserves uncertainty for
 possibly dispatched work. Runtime and refresh tasks retain state ownership until
-they finish or the process exits. Keep the same persistent directory on restart.
+they finish or the process exits. Blocking SQL and marker workers also retain the
+state lock after their async waiters are cancelled. Give the container termination
+grace period more than the 30-second drain deadline so normal shutdown can finish.
+Keep the same persistent directory on restart.
 
 A pending credential refresh marker requires explicit reconciliation. Neither a
 restart nor a newer vault item version clears an ambiguous issuance or failed

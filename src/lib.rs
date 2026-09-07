@@ -9,6 +9,7 @@ pub mod managed;
 pub mod onepassword;
 pub mod ports;
 pub mod providers;
+pub mod readiness;
 pub mod runtime;
 pub mod service;
 pub mod storage;

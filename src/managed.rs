@@ -100,6 +100,11 @@ impl ManagedInventory {
     /// Visit every account, retaining healthy progress even if another account fails.
     /// The first credential, storage or collection error summarizes a partial sync.
     pub async fn sync_all(&self) -> Result<()> {
+        // Persisted accounts outlive configuration. Removed entries must stop
+        // competing for fresh bindings before newly enrolled accounts synchronize.
+        self.ledger
+            .disable_unenrolled(&self.accounts.keys().cloned().collect())
+            .await?;
         let mut first_error = None;
         for account in self.accounts.values() {
             match self.sync_bounded(account).await {

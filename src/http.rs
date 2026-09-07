@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::{domain::*, ports::SecretValue, runtime::Router};
+use crate::{domain::*, ports::SecretValue, readiness::Readiness, runtime::Router};
 
 const BODY_LIMIT: usize = 2 * 1024 * 1024;
 
@@ -108,6 +108,32 @@ pub fn app(runtime: Arc<Router>, grants: BearerGrants) -> HttpRouter {
     HttpRouter::new()
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .merge(protected)
+}
+
+/// The persistent service owns and transitions the readiness handle.
+pub fn app_with_readiness(
+    runtime: Arc<Router>,
+    grants: BearerGrants,
+    readiness: Arc<Readiness>,
+) -> HttpRouter {
+    app(runtime, grants).route(
+        "/readyz",
+        get(move || {
+            let readiness = readiness.clone();
+            async move {
+                let ready = readiness.ready().await;
+                (
+                    if ready {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    },
+                    [(header::CACHE_CONTROL, "no-store")],
+                    Json(json!({"status": if ready { "ready" } else { "not_ready" }})),
+                )
+            }
+        }),
+    )
 }
 
 fn protocol(path: &str) -> Protocol {

@@ -15,13 +15,14 @@ use crate::{
     codex_auth::CodexRefresher,
     config::StateDirectory,
     domain::*,
-    http::{BearerGrants, app},
+    http::{BearerGrants, app_with_readiness},
     live::{LiveConfig, inventory_endpoints, validate_inventory},
     maintenance::CredentialMaintenance,
     managed::ManagedInventory,
     onepassword::OnePasswordStore,
     ports::{Clock, Ledger, SecretValue},
     providers::HttpTransport,
+    readiness::Readiness,
     runtime::{Router, SystemClock},
     storage::SqliteLedger,
     usage::HttpUsageCollector,
@@ -198,6 +199,7 @@ pub async fn run(config: ServeConfig, service_token: SecretValue) -> Result<()> 
         // Unavailable upstream accounts remain fenced while healthy enrollments serve.
         eprintln!("Poolparty initial maintenance incomplete: {:?}", error.code);
     }
+    let readiness = Arc::new(Readiness::new(ledger.clone()));
     let runtime = Arc::new(
         Router::new(ledger, transport, store, clock)
             .with_preparation(managed.clone())
@@ -211,11 +213,12 @@ pub async fn run(config: ServeConfig, service_token: SecretValue) -> Result<()> 
     );
     serve_until(
         listener,
-        app(runtime, grants),
+        app_with_readiness(runtime, grants, readiness.clone()),
         managed,
         Duration::from_secs(config.maintenance_interval_seconds),
         Duration::from_secs(30),
         shutdown_signal(),
+        Some(readiness),
     )
     .await
 }
@@ -241,10 +244,12 @@ pub async fn serve_until(
     interval: Duration,
     drain: Duration,
     shutdown: impl Future<Output = ()> + Send,
+    readiness: Option<Arc<Readiness>>,
 ) -> Result<()> {
     if interval.is_zero() || drain.is_zero() {
         return Err(invalid("Maintenance and drain durations must be positive."));
     }
+    let _lifecycle = readiness.as_ref().map(Readiness::serving);
     let (stop, mut stop_worker) = watch::channel(false);
     let mut stop_server = stop.subscribe();
     let mut worker = tokio::spawn(async move {
@@ -275,6 +280,9 @@ pub async fn serve_until(
         result = &mut serving => Some(result),
         _ = &mut shutdown => None,
     };
+    if let Some(readiness) = &readiness {
+        readiness.stop();
+    }
     let _ = stop.send(true);
     let deadline = tokio::time::Instant::now() + drain;
     let server_result = match completed {

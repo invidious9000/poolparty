@@ -53,3 +53,34 @@ fn identifiers_validate_deserialization_and_path_separators() {
         "binding-a"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn private_state_child_can_be_created_under_group_writable_volume_without_changing_mount_permissions()
+ {
+    use std::os::unix::fs::PermissionsExt;
+    let temporary = tempfile::tempdir().unwrap();
+    let mount = temporary.path().canonicalize().unwrap().join("volume");
+    std::fs::create_dir(&mount).unwrap();
+    std::fs::set_permissions(&mount, std::fs::Permissions::from_mode(0o770)).unwrap();
+    assert!(StateDirectory::acquire(&mount).is_err());
+    let private = mount.join("state");
+    let state = StateDirectory::acquire(&private).unwrap();
+    assert_eq!(
+        std::fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(private.join("daemon.lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(&mount).unwrap().permissions().mode() & 0o777,
+        0o770
+    );
+    assert_eq!(state.database, private.join("poolparty.sqlite3"));
+}

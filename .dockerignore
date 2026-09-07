@@ -1,0 +1,12 @@
+# Build context allowlist. Runtime configuration, credentials, history, tests,
+# local state, repository metadata and prebuilt artifacts never enter the context.
+**
+!Dockerfile
+!.dockerignore
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!LICENSE
+!src/
+src/**
+!src/**/*.rs
