@@ -1,7 +1,7 @@
 # Poolparty
 
 A planned self-hosted account allocator and protocol router for Codex subscription
-accounts and Kimi/GLM coding plans. MiniMax is a future adapter option.
+accounts, Kimi/GLM coding plans, and DeepSeek PAYG. MiniMax is a future adapter option.
 
 Independent clients share account capacity and usage visibility through one
 service. Sessions keep their provider/account binding; an exhausted resumed

@@ -1,8 +1,8 @@
 # Providers, credentials, and usage
 
-Status: Codex subscriptions plus Kimi and GLM coding plans are settled;
-adapter details require validation. Metered API products are deferred and cannot
-serve as automatic paid overflow when a coding-plan window is exhausted.
+Status: Codex subscriptions, Kimi/GLM coding plans and DeepSeek PAYG are in scope;
+adapter details require validation. Kimi/GLM metered API products remain deferred.
+PAYG never provides implicit overflow for an existing subscription-bound session.
 
 ## Provider boundary
 
@@ -11,6 +11,7 @@ serve as automatic paid overflow when a coding-plan window is exhausted.
 | Codex subscriptions | Native Codex backend Responses, including streaming and continuation | Validate account enrollment, refresh, usage, HTTP/SSE, WebSocket, compaction, and native CLI configuration |
 | Kimi | Anthropic Messages using the chosen product's endpoint and credentials | Published Kimi Code compatibility; distinguish membership from platform products |
 | GLM / Z.AI | Anthropic Messages; Chat Completions when a consumer requires it | Published coding-plan protocol endpoints; retain endpoint/product distinction |
+| DeepSeek PAYG | Anthropic Messages initially; other native protocols separately validated | [Balance, concurrency and prior integration DD](../research/deepseek.md) |
 | MiniMax | Future option, Anthropic Messages | Retain research; not a first-release integration gate |
 | Actual Anthropic | Excluded | No Claude subscription OAuth, Fable quota logic, or Claude monitoring probes |
 

@@ -17,13 +17,18 @@ caps can coexist with an account-wide cap; admission must satisfy every applicab
 constraint. Requests through Messages and Chat Completions share counters when
 they consume the same provider capacity.
 
-The initial Chinese-provider accounts use coding plans. GLM's balance-consumption
+Kimi/GLM accounts use coding plans; DeepSeek uses PAYG. GLM's balance-consumption
 API concurrency table does not apply to those accounts. Consult the matching
 package benefits and [provider spike](../research/chinese-providers-spike.md);
 do not import metered API ceilings as Coding Plan defaults. Conservatively
 aggregate credential aliases at account scope until the actual scope is known.
 Do not multiply capacity by issuing extra keys. Unknown scope remains visible
 to operators.
+
+DeepSeek publishes account/model ceilings across keys and additional user scopes
+for expanded accounts; see its [PAYG report](../research/deepseek.md). Enforce
+applicable monetary reservations separately from concurrency and subscription
+windows. A currency balance is not a quota utilization percentage.
 
 Local safety caps can be stricter than published limits. Raising a local cap does
 not override a verified provider cap. Unknown provider limits are not infinite:

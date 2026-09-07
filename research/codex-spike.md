@@ -75,6 +75,13 @@ backpressure, tool execution, or real upstream continuation semantics.
 
 ## Enrollment, account ownership, and refresh
 
+Follow-up source review found an existing integration with refresh, usage reads,
+HTTP/WS continuation and unary compaction, plus recorded historical live results.
+See [integration priors](integration-priors.md). These narrow feasibility questions;
+the live checks below concern the new custody boundary, current native version
+and Poolparty guarantees. They do not mean no implementation or prior validation
+exists.
+
 **Vendor contract**: Codex supports ChatGPT sign-in, including device-code login
 when enabled by the account/workspace. It refreshes managed tokens automatically
 and stores auth in a file or credential store. These are human enrollment and

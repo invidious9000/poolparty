@@ -5,6 +5,8 @@ requirements come from the product scope; proposed endpoint names and component
 choices are not a released API. Provider evidence was reviewed on 2026-09-06.
 
 Start with the [DD review](dd-review.md) for current findings and open gates.
+The [prior integration review](../research/integration-priors.md) maps existing
+GLM, Codex, DeepSeek and Kimi evidence to the remaining work.
 Then read in this order:
 
 1. [Architecture](architecture.md): runtime, ownership, storage, alternatives.

@@ -8,10 +8,11 @@ workspaces, tool execution, conversations, and recovery decisions.
 ## Settled requirements
 
 - Separate public repository, independent of any one consumer or private estate.
-- Target Codex subscriptions and Chinese coding providers, initially Kimi and GLM.
+- Target Codex subscriptions, Kimi/GLM coding plans, and DeepSeek PAYG.
   MiniMax is a named future adapter option.
-- Chinese-provider coding plans are the initial account products. Metered API
-  products are separate future adapters, not automatic fallback capacity.
+- Keep subscription windows and PAYG balances/budgets distinct. DeepSeek is an
+  explicitly selectable product, not automatic overflow for a bound subscription
+  session. Kimi/GLM metered products remain separate future adapters.
 - Retain Anthropic Messages compatibility for those providers; omit actual
   Anthropic/Claude integration and its account-specific machinery.
 - Preserve provider/account pins across session resume and quota exhaustion.
@@ -48,6 +49,7 @@ independent allocators against the same accounts and call that shared admission.
 - [Due diligence review and remaining gates](design/dd-review.md)
 - [Concurrency and admission](design/admission.md)
 - [Reference assessment](research/codex-lb.md)
+- [DeepSeek PAYG and prior integration evidence](research/deepseek.md)
 
 ## Current implementation state
 

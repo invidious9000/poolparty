@@ -5,6 +5,12 @@ No credentials, provider inference calls, account changes, or consumer changes
 were used. This is implementation input, not a production conformance claim.
 Actual Anthropic provider integration remains excluded; Messages is the protocol.
 
+Follow-up: [existing integration priors](integration-priors.md) include GLM quota
+parsing and live usage/cache/continuation findings, plus earlier Kimi coding cache
+tests. Treat unverified items below as limits of this source/client spike; dated
+prior checks narrow the new validation work. [DeepSeek PAYG](deepseek.md) is now
+an additional initial product, independently scoped from these coding plans.
+
 ## Evidence and recommendation
 
 Evidence labels:

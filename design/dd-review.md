@@ -10,10 +10,10 @@ codex-lb as a reference, with selective transport adaptation only when justified
 by a concrete compatibility test. Its current Rust library exposes a stdio runtime,
 not a typed transport API suitable for direct embedding.
 
-The first account products are Codex subscriptions and Kimi/GLM coding plans.
-MiniMax is a named future option. Metered API products and automatic paid overflow
-are outside the initial slice. Preserve native Responses and Messages protocols;
-actual Anthropic account integration remains excluded.
+The first account products are Codex subscriptions, Kimi/GLM coding plans and
+DeepSeek PAYG. MiniMax is a named future option. Kimi/GLM metered products and
+implicit paid overflow for a bound session remain excluded. Preserve native
+Responses and Messages protocols; actual Anthropic integration remains excluded.
 
 Start implementing the domain and synthetic transports once these reports are
 reviewed. Native integration and live provider acceptance remain separate gates.
@@ -28,6 +28,7 @@ production-readiness claim.
 | [Chinese providers](../research/chinese-providers-spike.md) | Primary-source product and protocol matrix; native Messages tool-continuation and quota-error fixture | Account-visible limits, native cross-process resume, real upstream feature/usage behavior |
 | [Rust egress](../research/egress-reuse-spike.md) | Pinned exports, transport control flow, dependencies and license inspection | Original Rust transport implementation and runtime conformance |
 | Consumer/admission review | Independently expressed consumer requirements and [admission contract](admission.md); private mappings retained separately | Later consumer changes, credential custody cutover and deployment validation |
+| [Existing integration priors](../research/integration-priors.md) | GLM quota/SSE, Codex refresh/usage/compaction/continuation, DeepSeek balance and earlier live checks | Adapt custody and strict admission; revalidate changed schemas and client versions |
 
 Consult the individual reports for versions, commands, source links, executed
 results, and explicit untested cases. No fixture contains a real provider token,
@@ -71,7 +72,7 @@ There is no Rust daemon build or provider-backend conformance result yet.
 
 | Question | Working default / disposition | Closure evidence |
 | --- | --- | --- |
-| Coding plans or metered API? | Resolved: Kimi/GLM coding plans first; MiniMax future | Product direction confirmed; actual package inventory belongs in the private overlay |
+| Coding plans or metered API? | Codex subscriptions, Kimi/GLM coding plans, DeepSeek PAYG; MiniMax future | Product direction confirmed; actual account inventory belongs in the private overlay |
 | Fork, dependency, or independent implementation? | Recommend independent Rust; current egress crate reference-only | API mismatch established; adoption requires original transport conformance tests |
 | Bound URLs or implicit native session lookup? | Explicit bound URL first | Pinned CLI/app-server fixture; each resume restores configuration |
 | Strict single model versus native helper requests? | Primary hard pin plus an explicit auxiliary-model allowlist, all on the same account | Validate each client helper/compaction route; unsupported models fail visibly |

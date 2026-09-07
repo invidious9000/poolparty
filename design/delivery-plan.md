@@ -6,6 +6,9 @@ spikes. See [DD review](dd-review.md) for executed evidence and remaining gates.
 ## 1. Resolve compatibility before broad implementation
 
 - Pin reference revisions and native client versions.
+- Start from [existing integration priors](../research/integration-priors.md),
+  including GLM quota/SSE and Codex refresh/usage/compaction. Probe the changed
+  contracts and router-specific guarantees instead of repeating broad discovery.
 - Validate Codex subscription enrollment, refresh ownership, quota collection,
   Responses HTTP/SSE, WebSocket continuation, model discovery, and compaction.
 - Determine the actual lifetime of native process/session/thread/turn identifiers
@@ -76,7 +79,7 @@ own repository after the service contract is proven.
 | Decision | Current proposal | Evidence needed |
 | --- | --- | --- |
 | Extend codex-lb or build independently | Independent Rust application; current egress crate reference-only | Source/API spike complete; Rust transport conformance remains |
-| Exact first provider products | Codex subscriptions plus Kimi/GLM coding plans; MiniMax future | Direction resolved; package-specific limits and live behavior remain |
+| Exact first provider products | Codex subscriptions, Kimi/GLM coding plans, DeepSeek PAYG; MiniMax future | Direction resolved; account-specific limits and live behavior remain |
 | Binding carrier for each native client | Explicit control allocation and bound base URL | Codex CLI/app-server fixture established core path; remaining native cases in DD reports |
 | Dashboard tooling | TypeScript/React/Vite embedded assets | First UI slice; no SSR requirement identified |
 | Credential persistence backend | Secret-store interface with one refresh authority | Vault write/rotation semantics and restore procedure |

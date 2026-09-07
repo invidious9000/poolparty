@@ -36,6 +36,7 @@ flowchart LR
   Core --> Adapters[Provider adapters]
   Adapters --> Codex[Codex subscription upstream]
   Adapters --> Others[Kimi / GLM coding plans]
+  Adapters --> PAYG[DeepSeek PAYG]
   Collect[Usage collection] --> Adapters
   Collect --> DB
 ```
