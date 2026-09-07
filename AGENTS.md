@@ -59,6 +59,12 @@ and CI log must be suitable for unrestricted public disclosure.
   another contributor's work. Inspect git status before scoped mutations.
 - Do not mutate shared services, deployment state, or production credentials
   without explicit authorization for the named operation.
+- Deployment operations belong to the operator's separate private overlay. Read
+  its instructions and use its existing converge, restart and verification helpers
+  rather than reconstructing a deployment workflow here. Preserve established
+  state and credential custody across updates; bootstrap is not rollout recovery.
+  Keep its paths, commands containing private inputs, and runtime evidence out of
+  this public repository.
 - Keep root instructions conceptual. Put deep contracts in `design/`, current
   operating instructions in `docs/` when implementation exists, and public
   reference analysis in `research/` with immutable source revisions.
