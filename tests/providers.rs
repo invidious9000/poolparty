@@ -31,7 +31,16 @@ struct Origin {
     url: String,
     calls: Arc<AtomicUsize>,
     seen: Seen,
+    streams_dropped: Arc<AtomicUsize>,
     task: JoinHandle<()>,
+}
+
+struct StreamLifetime(Arc<AtomicUsize>);
+
+impl Drop for StreamLifetime {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 impl Drop for Origin {
@@ -58,21 +67,25 @@ async fn origin_with_content_type(
 ) -> Origin {
     let calls = Arc::new(AtomicUsize::new(0));
     let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let streams_dropped = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
         "/inference",
         post({
             let calls = calls.clone();
             let seen = seen.clone();
+            let streams_dropped = streams_dropped.clone();
             move |request: Request| {
                 let calls = calls.clone();
                 let seen = seen.clone();
                 let chunks = chunks.clone();
+                let streams_dropped = streams_dropped.clone();
                 async move {
                     calls.fetch_add(1, Ordering::SeqCst);
                     let (parts, body) = request.into_parts();
                     let body = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
                     seen.lock().await.push((parts.headers, body));
                     let output = async_stream::stream! {
+                        let _lifetime = StreamLifetime(streams_dropped);
                         for chunk in chunks {
                             yield Ok::<Bytes, Infallible>(chunk);
                             tokio::task::yield_now().await;
@@ -102,6 +115,7 @@ async fn origin_with_content_type(
         url: format!("http://{address}/inference"),
         calls,
         seen,
+        streams_dropped,
         task,
     }
 }
@@ -349,6 +363,174 @@ async fn messages_preserve_tools_signatures_and_usage_with_product_auth() {
 }
 
 #[tokio::test]
+async fn glm_preserves_thinking_tool_fragments_and_complete_continuation_bodies() {
+    let wire = concat!(
+        "event: message_start\r\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"synthetic-message\",\"content\":[]}}\r\n\r\n",
+        "event: content_block_start\r\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\r\n\r\n",
+        "event: content_block_delta\r\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"preserve response.completed and message_stop as text\"}}\r\n\r\n",
+        "event: content_block_delta\r\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"synthetic-signature\"}}\r\n\r\n",
+        "event: content_block_stop\r\ndata: {\"type\":\"content_block_stop\",\"index\":0}\r\n\r\n",
+        "event: content_block_start\r\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-a\",\"name\":\"read_fixture\",\"input\":{}}}\r\n\r\n",
+        "event: content_block_delta\r\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\r\n\r\n",
+        "event: content_block_delta\r\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"fixture.txt\\\"}\"}}\r\n\r\n",
+        "event: content_block_stop\r\ndata: {\"type\":\"content_block_stop\",\"index\":1}\r\n\r\n",
+        "event: message_delta\r\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":23,\"cache_read_input_tokens\":7}}\r\n\r\n",
+        "event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n"
+    );
+    let server = origin(
+        StatusCode::OK,
+        wire.as_bytes()
+            .chunks(7)
+            .map(Bytes::copy_from_slice)
+            .collect(),
+        true,
+    )
+    .await;
+    let adapter = transport(&server, Product::GlmCoding);
+    let initial = serde_json::json!({
+        "model":"synthetic-model", "stream":true, "thinking":{"type":"adaptive"},
+        "output_config":{"effort":"high"}, "max_tokens":256,
+        "messages":[{"role":"user","content":"Read the synthetic fixture"}],
+        "tools":[{"name":"read_fixture","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]
+    });
+    let mut continuation = initial.clone();
+    continuation["messages"] = serde_json::json!([
+        initial["messages"][0],
+        {"role":"assistant","content":[
+            {"type":"thinking","thinking":"preserve response.completed and message_stop as text","signature":"synthetic-signature"},
+            {"type":"tool_use","id":"tool-a","name":"read_fixture","input":{"path":"fixture.txt"}}
+        ]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-a","content":"synthetic result"}]}
+    ]);
+    for body in [initial, continuation] {
+        let original = Bytes::from(serde_json::to_vec(&body).unwrap());
+        let mut req = request(Product::GlmCoding);
+        req.body = original.clone();
+        let response = adapter.send(req).await.unwrap();
+        let (bytes, terminal, errors) =
+            tokio::time::timeout(Duration::from_secs(3), collect(response))
+                .await
+                .unwrap();
+        assert_eq!(bytes, wire.as_bytes());
+        assert_eq!(terminal, [Settlement::Succeeded]);
+        assert!(errors.is_empty());
+        let seen = server.seen.lock().await;
+        assert_eq!(seen.last().unwrap().1, original);
+        assert_eq!(
+            seen.last().unwrap().0["authorization"],
+            "Bearer synthetic-api-key"
+        );
+        assert_eq!(seen.last().unwrap().0["anthropic-version"], "2023-06-01");
+    }
+    assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn glm_partial_messages_and_json_application_errors_remain_uncertain() {
+    for (wire, content_type) in [
+        (
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            "text/event-stream",
+        ),
+        ("data: {\"type\":\"message_stop\"}\n", "text/event-stream"),
+        ("data: [DONE]\n\n", "text/event-stream"),
+        (
+            "event: message_stop\ndata: {\"type\":\"message_delta\"}\n\n",
+            "text/event-stream",
+        ),
+        (
+            "{\"error\":{\"code\":\"1308\",\"message\":\"synthetic rejection\"}}",
+            "application/json",
+        ),
+    ] {
+        let server = origin_with_content_type(
+            StatusCode::OK,
+            vec![Bytes::copy_from_slice(wire.as_bytes())],
+            false,
+            Some(content_type),
+        )
+        .await;
+        let (_, terminal, errors) = collect(
+            transport(&server, Product::GlmCoding)
+                .send(request(Product::GlmCoding))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(terminal.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].certainty, DispatchCertainty::Unknown);
+        assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn glm_error_codes_preserve_distinct_native_bodies_without_retry() {
+    // Vendor documents HTTP429 for several different causes; it is not itself a
+    // quota observation: https://docs.z.ai/api-reference/api-code
+    for (status, code) in [
+        (StatusCode::UNAUTHORIZED, "1003"),
+        (StatusCode::FORBIDDEN, "1220"),
+        (StatusCode::TOO_MANY_REQUESTS, "1113"),
+        (StatusCode::TOO_MANY_REQUESTS, "1302"),
+        (StatusCode::TOO_MANY_REQUESTS, "1308"),
+        (StatusCode::TOO_MANY_REQUESTS, "1309"),
+        (StatusCode::TOO_MANY_REQUESTS, "1310"),
+        (StatusCode::TOO_MANY_REQUESTS, "1311"),
+    ] {
+        let body = serde_json::to_vec(
+            &serde_json::json!({"error":{"code":code,"message":"synthetic rejection"}}),
+        )
+        .unwrap();
+        let server = origin_with_content_type(
+            status,
+            vec![Bytes::copy_from_slice(&body)],
+            false,
+            Some("application/json"),
+        )
+        .await;
+        let response = transport(&server, Product::GlmCoding)
+            .send(request(Product::GlmCoding))
+            .await
+            .unwrap();
+        assert_eq!(response.status, status.as_u16());
+        let (bytes, terminal, errors) = collect(response).await;
+        assert_eq!(bytes, body);
+        assert_eq!(terminal, [Settlement::Rejected]);
+        assert!(errors.is_empty());
+        assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn glm_stream_cancellation_closes_the_origin_without_retry_or_terminal() {
+    let server = origin(
+        StatusCode::OK,
+        vec![Bytes::from_static(b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"synthetic in-progress reasoning\"}}\n\n")],
+        true,
+    ).await;
+    let mut response = transport(&server, Product::GlmCoding)
+        .send(request(Product::GlmCoding))
+        .await
+        .unwrap();
+    assert!(matches!(
+        response.stream.next().await.unwrap().unwrap(),
+        StreamEvent::Data(_)
+    ));
+    assert_eq!(server.streams_dropped.load(Ordering::SeqCst), 0);
+    drop(response);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while server.streams_dropped.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(server.streams_dropped.load(Ordering::SeqCst), 1);
+    assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn eof_wrong_protocol_and_text_markers_never_prove_completion() {
     for (product, wire) in [
         (
@@ -423,6 +605,7 @@ async fn native_failures_settle_without_waiting_for_socket_close() {
         (Product::CodexSubscription, "response.failed"),
         (Product::CodexSubscription, "response.incomplete"),
         (Product::KimiCoding, "error"),
+        (Product::GlmCoding, "error"),
     ] {
         let wire = format!("event: {kind}\ndata: {{\"type\":\"{kind}\"}}\n\n");
         let server = origin(StatusCode::OK, vec![Bytes::from(wire)], true).await;

@@ -235,6 +235,29 @@ fn glm_exhaustion_beats_incomplete_rows_and_zero_limit_is_unknown() {
 }
 
 #[test]
+fn glm_invalid_window_durations_do_not_establish_available_or_exhausted_scope() {
+    for unit in [3, 6] {
+        for number in [0, u64::MAX] {
+            for percentage in [0, 100] {
+                let observation = parse(
+                    Product::GlmCoding,
+                    json!({"data":{"limits":[{
+                        "type":"TOKENS_LIMIT", "unit":unit, "number":number,
+                        "percentage":percentage
+                    }]}}),
+                );
+                assert_eq!(observation.status, CapacityStatus::Unknown);
+                assert_eq!(observation.windows[0].window_seconds, None);
+                assert_eq!(
+                    observation.windows[0].used_percent,
+                    Some(percentage.to_string())
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn deepseek_retains_all_currencies_components_and_exact_decimals() {
     let observation = parse(
         Product::DeepseekPayg,

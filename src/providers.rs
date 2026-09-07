@@ -422,6 +422,26 @@ mod tests {
     }
 
     #[test]
+    fn messages_terminal_frames_survive_every_byte_boundary() {
+        for (wire, outcome) in [
+            (
+                b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n".as_slice(),
+                Settlement::Succeeded,
+            ),
+            (
+                b"event: error\r\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"synthetic failure\"}}\r\n\r\n".as_slice(),
+                Settlement::Rejected,
+            ),
+        ] {
+            for split in 0..wire.len() {
+                let mut parser = TerminalParser::new(Protocol::Messages);
+                assert_eq!(parser.feed(&wire[..split]), Ok(None));
+                assert_eq!(parser.feed(&wire[split..]), Ok(Some(outcome)));
+            }
+        }
+    }
+
+    #[test]
     fn comments_reset_bounds_per_frame_and_never_create_a_terminal() {
         let mut parser = TerminalParser::new(Protocol::Messages);
         for _ in 0..MAX_EVENT_BYTES {

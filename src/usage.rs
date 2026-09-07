@@ -471,7 +471,13 @@ fn glm(value: &Value, observation: &mut UsageObservation) -> Result<()> {
         } else {
             CapacityStatus::Unknown
         };
-        let scope_known = matches!((unit, number), (Some(3), Some(1..)) | (Some(6), Some(1..)));
+        let window_seconds = match (unit, number) {
+            (Some(3), Some(number)) => number.checked_mul(3600),
+            (Some(6), Some(number)) => number.checked_mul(7 * 24 * 3600),
+            _ => None,
+        }
+        .filter(|seconds| *seconds > 0);
+        let scope_known = window_seconds.is_some();
         if kind != "TIME_LIMIT" {
             states.push(
                 if !scope_known || (state != CapacityStatus::Exhausted && limit == Some(0)) {
@@ -496,11 +502,7 @@ fn glm(value: &Value, observation: &mut UsageObservation) -> Result<()> {
             used,
             limit,
             used_percent: percent,
-            window_seconds: match (unit, number) {
-                (Some(3), Some(number)) => number.checked_mul(3600),
-                (Some(6), Some(number)) => number.checked_mul(7 * 24 * 3600),
-                _ => None,
-            },
+            window_seconds,
             resets_at: row
                 .get("nextResetTime")
                 .and_then(Value::as_i64)
