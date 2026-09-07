@@ -48,6 +48,10 @@ and CI log must be suitable for unrestricted public disclosure.
   account identity. Missing resume state fails explicitly.
 - Preserve native streaming, tool and reasoning content, continuation references,
   and cache behavior. Do not silently downgrade a hard model/capability/effort pin.
+- Credential read caching is process-only and bounded. Expiry requires a fresh
+  read; known vault failure blocks cached use and refresh during backoff. Preserve
+  fresh writeback verification and durable refresh fences. See
+  [credential storage](docs/onepassword.md) for revocation visibility.
 - Unknown, stale, exhausted, unauthorized, and unsupported are different states.
   Local request counters do not establish authoritative provider quota remaining.
 - Provider secrets stay separate from caller authentication. Internal network

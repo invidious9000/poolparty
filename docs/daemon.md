@@ -164,7 +164,12 @@ caller chooses whether to wait or create a new logical session.
 
 The default background interval is 30 seconds; configuration accepts 5 through
 3600 seconds. Request preparation also checks the enrolled account before
-admission, using the manager's bounded freshness cache. Refresh aliases share one
+admission, using the manager's bounded freshness cache. Separately, verified vault
+values remain in memory for at most one hour, with a shared 15-minute backoff on
+vault failure. This avoids a vault read per usage check or inference. Cache expiry
+requires fresh success, and refresh replacement still checks and verifies the vault
+directly. See [credential storage](onepassword.md) for revocation visibility and
+rate-limit operation. Refresh aliases share one
 credential authority. Startup synchronization visits the enrolled accounts before
 serving. Upstream credential or collection failures are reported as sanitized
 codes while healthy enrollment remains available and affected credentials stay

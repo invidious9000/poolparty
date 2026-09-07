@@ -21,6 +21,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --locked
 python3 spikes/core/smoke.py
 python3 -m unittest discover -s spikes/codex -p 'test_*.py'
+python3 -m unittest discover -s spikes/messages -p 'test_*.py'
 ```
 
 The smoke check starts its own daemon on loopback, generates a temporary caller
@@ -121,9 +122,9 @@ Container builds and deployed ingress checks are separate from the local test su
 
 ## Current validation evidence
 
-The current slice passes 116 Rust tests, seven Python fixture tests, formatting,
-workspace check/build, clippy with warnings denied and the synthetic process
-restart smoke check. These automated fixtures use isolated state and synthetic
+The automated gates cover the Rust workspace, both native Python fixtures,
+formatting, workspace check/build, clippy with warnings denied and the synthetic
+process restart smoke check. These automated fixtures use isolated state and synthetic
 origins; they do not contact real providers or a vault.
 
 Separate explicitly authorized live validation exercised installed 1Password CLI
@@ -134,6 +135,11 @@ restart and credential rotation and four afterward. Both phases executed native
 shell tools. The native thread, Poolparty binding and bound account stayed fixed
 while the credential generation advanced. See the
 [native validation fixture](native-codex.md) for its assertions and opt-in controls.
+
+The [native Messages fixture](native-messages.md) provides bounded GLM start/tool
+and resume checks with synthetic offline coverage. Its existence does not
+establish successful live native acceptance. Direct GLM SSE completion and usage
+collection have been observed separately.
 
 The live Codex backend omitted `Content-Type` on valid SSE; the narrow adapter
 handling above enabled the stream without relaxing completion checks. Previously

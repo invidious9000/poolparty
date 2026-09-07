@@ -3,8 +3,8 @@
 The CLI adapter maps each logical credential to stable vault, item and field IDs.
 Titles and field labels never select a credential. Each item holds one mapped
 credential because the item version is the credential generation. Changes to any
-field advance that generation. `latest` obtains the current version and value;
-`load` requires the exact version requested by an admitted attempt.
+field advance that generation. `latest` obtains the latest observed version and
+value; `load` requires the exact version requested by an admitted attempt.
 
 The service account token enters only the CLI child's environment. Credential
 values travel through captured output and JSON on stdin, never arguments or
@@ -27,9 +27,43 @@ the deployment's ephemeral-volume lifecycle to remove. The vendor documents
 [the configuration directory and cache flags](https://www.1password.dev/cli/reference)
 and [their environment-variable counterparts](https://www.1password.dev/cli/environment-variables).
 
-`replace` serializes access, reads and checks the expected item version, edits the
+The persistent service caches each credential's value and generation in process
+memory for at most one hour after a verified read. Repeated resolution, usage and
+inference share that entry; access does not extend its expiry. Expired entries
+require a fresh read and are never served on failure. The default store and
+one-shot maintenance commands keep fresh-read behavior. This cache is separate
+from the disabled CLI cache; it writes no credential payload to disk.
+
+CLI failures invalidate the affected entry and stop all store reads and
+replacements for 15 minutes, including otherwise valid cache hits. Invalid item
+content, generation rollback and semantic replacement conflicts instead fence
+only the affected credential for 15 minutes, preserving healthy accounts. After that deadline, a fresh successful
+vault read is required before cached service resumes. This shared backoff prevents
+account fanout and inference traffic from repeatedly hitting an unavailable vault,
+and prevents known vault failure from permitting an OAuth exchange whose writeback
+cannot proceed. Restart clears both cache and backoff, so repeated restarts are
+not a rate-limit recovery procedure. Pending refresh fences remain durable.
+
+The one-hour interval is also the maximum normal delay before discovering a
+vault-only edit, deletion or service-account grant revocation. The manager's more
+frequent expiry/usage checks do not establish a fresh vault read. Provider-side
+revocation can still reject the next upstream request. For immediate removal,
+disable the account enrollment or caller grant and perform a controlled restart;
+do not rely on editing the vault while the owner is active. A restarted process
+requires fresh credentials and does not restore cached secrets from its ledger.
+
+Size enrollment and operational reads against the account's shared
+[service-account rate limits](https://www.1password.dev/service-accounts/rate-limits).
+Daily allowances cover all service accounts in the account, and some CLI commands
+use multiple API requests. `op service-account ratelimit --format json`, with the
+service token supplied through the environment, reports the applicable remaining
+allowances and reset intervals. Usage checks against provider APIs retain their
+own freshness cadence; they do not need a new vault read for every observation.
+
+`replace` invalidates the cached entry, serializes access, freshly reads and checks the expected item version, edits the
 complete item through stdin, and verifies both the edit result and a fresh read.
-It checks the next version, new value and preservation of other item content.
+Only complete successful verification repopulates the cache. It checks the next
+version, new value and preservation of other item content.
 Empty DATE fields are omitted from edits to avoid a zero-date round trip. Missing,
 null and empty ordinary field values are equivalent during preservation checks;
 empty DATE fields may be absent. Populated dates remain unchanged. Version and

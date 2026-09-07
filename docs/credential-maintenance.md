@@ -29,6 +29,9 @@ update credential generation/account/policy/observation state. **`--check` is no
 read-only or dry-run command:** refreshing Codex can change the vaulted bundle.
 An API key has no OAuth refresh operation. Credential aliases share one resolution
 result within an invocation, including failures; an alias does not retry issuance.
+One-shot commands use fresh vault reads. The persistent service instead shares a
+bounded in-memory credential cache and store-wide failure backoff, described in
+[1Password storage](onepassword.md). Neither mode uses a disk credential cache.
 
 Reports contain configured account labels, products, generations, capacity states,
 window counts and error codes. Probe reports add binding/attempt IDs, HTTP status,
