@@ -94,7 +94,11 @@ references are stable vault/item/field IDs, with one mapped credential per item;
 see [1Password storage](onepassword.md). Codex fields contain an auth JSON bundle;
 API-key fields contain the key string. `expected_account_id` is required for
 Codex and must match the enrolled bundle. It is unrelated to the internal `id` or
-`quota_owner` label.
+`quota_owner` label. `model` is the probe and usage model and is always served.
+An optional `models` list adds further served models; the entry `"*"` means the
+account serves any model its provider accepts, and the provider's own rejection
+is then the explicit error. Model-specific provider restrictions still leave
+capacity unknown rather than being scored.
 
 Accounts sharing a credential must agree on product, upstream account identity
 and quota owner. Accounts sharing a quota owner must agree on concurrency and

@@ -100,6 +100,15 @@ pub struct Account {
     pub enabled: bool,
 }
 
+/// Model set entry meaning the account serves any model its provider accepts.
+pub const ANY_MODEL: &str = "*";
+
+impl Account {
+    pub fn serves(&self, model: &str) -> bool {
+        self.models.contains(ANY_MODEL) || self.models.contains(model)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnknownCapacityPolicy {
@@ -172,8 +181,12 @@ pub struct CreateBinding {
     pub session: ClientSessionId,
     pub pool: PoolId,
     pub product: Product,
-    pub model: String,
+    /// A hard model pin. Absent, each request's model passes through to the
+    /// bound account as long as that account serves it.
+    #[serde(default)]
+    pub model: Option<String>,
     pub account: Option<AccountId>,
+    /// A hard effort pin. Absent, each request's effort passes through.
     pub effort: Option<String>,
 }
 

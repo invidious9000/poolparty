@@ -48,7 +48,7 @@ fn intent(session: &str, account: Option<&str>) -> CreateBinding {
         session: ClientSessionId::new(session).unwrap(),
         pool: PoolId::new("pool-a").unwrap(),
         product: Product::CodexSubscription,
-        model: "model-a".to_owned(),
+        model: Some("model-a".to_owned()),
         account: account.map(|value| AccountId::new(value).unwrap()),
         effort: Some("high".to_owned()),
     }
@@ -58,7 +58,11 @@ fn admission(binding: &Binding, operation: Option<&str>) -> Admission {
         binding: binding.id.clone(),
         operation: operation.map(|value| OperationId::new(value).unwrap()),
         request_fingerprint: "synthetic-sha256".to_owned(),
-        model: binding.intent.model.clone(),
+        model: binding
+            .intent
+            .model
+            .clone()
+            .unwrap_or_else(|| "model-a".to_owned()),
         effort: binding.intent.effort.clone(),
     }
 }
@@ -1313,7 +1317,7 @@ async fn session_creation_explains_pool_exclusions_with_the_real_cause() {
     disabled.enabled = false;
     fixture.ledger.put_account(disabled).await.unwrap();
     let mut wrong_model = intent("session-f", None);
-    wrong_model.model = "model-z".to_owned();
+    wrong_model.model = Some("model-z".to_owned());
     let unmatched = fixture
         .ledger
         .create_binding(&fixture.principal, wrong_model, 10)

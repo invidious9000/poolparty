@@ -114,11 +114,14 @@ curl --fail-with-body http://127.0.0.1:8080/api/v1/sessions \
   --data '{"session":"session-a","pool":"pool-a","product":"codex_subscription","model":"example-codex-model"}'
 ```
 
-Save the returned binding ID in the caller's own durable session mapping. Native
-Codex's configured base URL is then
-`http://127.0.0.1:8080/routes/BINDING_ID/codex`, with the caller grant as its bearer.
-The caller supplies the same binding after a process or daemon restart. Use the
-HTTP-only native configuration and retry restrictions from the
+`model` and `effort` are optional hard pins. Native clients normally use the
+drop-in surface instead: a static base URL of `http://127.0.0.1:8080/v1` with the
+caller grant as its bearer, where the router binds each native thread on its
+first request and keeps it on that account across process and daemon restarts;
+see [the development notes](development.md#drop-in-surface). A caller that
+wants a hard pin or a chosen binding uses the returned binding ID as the base
+URL `http://127.0.0.1:8080/routes/BINDING_ID/codex` instead. Use the HTTP-only
+native configuration and retry restrictions from the
 [Codex compatibility spike](../research/codex-spike.md); default native retries do
 not establish safe replay behavior.
 

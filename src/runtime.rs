@@ -131,7 +131,13 @@ impl Router {
         if binding.closed_at.is_some() {
             return Err(Error::new(ErrorCode::Closed, "Binding is closed.").bound(&binding_id));
         }
-        if binding.intent.model != model || binding.intent.effort != effort {
+        if binding
+            .intent
+            .model
+            .as_ref()
+            .is_some_and(|pinned| pinned != &model)
+            || binding.intent.effort.is_some() && binding.intent.effort != effort
+        {
             return Err(Error::new(
                 ErrorCode::IntentConflict,
                 "Request conflicts with bound intent.",

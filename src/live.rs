@@ -47,7 +47,11 @@ pub struct LiveAccount {
     pub quota_owner: QuotaOwnerId,
     pub pool: PoolId,
     pub credential: CredentialId,
+    /// Probe and usage model; also served unless `models` says otherwise.
     pub model: String,
+    /// Additional served models; `"*"` means any model the provider accepts.
+    #[serde(default)]
+    pub models: Vec<String>,
     pub expected_account_id: Option<String>,
     pub max_concurrency: u32,
     pub unknown_capacity: UnknownCapacityPolicy,
@@ -219,7 +223,7 @@ pub async fn run(
                         session,
                         pool: setup.pool,
                         product: setup.product,
-                        model: setup.model,
+                        model: Some(setup.model),
                         account: Some(setup.id),
                         effort: None,
                     },

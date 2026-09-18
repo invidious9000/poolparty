@@ -71,18 +71,22 @@ Native clients need one static base URL and a caller grant, nothing else:
 The router derives the session from the client's own thread identity: the
 `thread-id` header, then the `session-id` header, then for Messages the
 `metadata.user_id` field (its trailing `session_<id>` segment when present).
-The first request on a thread creates the binding from the request body and the
-caller's authorized pools; every later request on that thread, including a
-resumed one, lands on the same binding and account. A different model or effort
-on an existing thread is `intent_conflict`, never a silent move. Successful and
-failed responses after binding carry `x-poolparty-binding` and
-`x-poolparty-account` headers. When several authorized pools serve the model,
+The first request on a thread creates an affinity-only binding from the request
+body and the caller's authorized pools; every later request on that thread,
+including a resumed one, lands on the same binding and account. Model, effort
+and any other body field such as a service tier pass through per request. A
+model the bound account does not serve is refused on that binding as
+`no_eligible_account`, never moved to another account. Successful and failed
+responses after binding carry `x-poolparty-binding` and `x-poolparty-account`
+headers. When several authorized pools serve the model,
 the caller sets `x-poolparty-pool`; `x-poolparty-account` pins one account.
 Requests without any session identity are rejected before dispatch. The
 explicit session API below remains for callers that choose or inspect bindings.
 
-Session creation selects the first eligible account in the pool by account ID,
-or the pinned `account` alone. When nothing is eligible, the error carries an
+On the explicit session API, `model` and `effort` are optional hard pins: when
+present, every request on that binding must match them; when absent, requests
+pass through as on the drop-in surface. Session creation selects the first
+eligible account in the pool by account ID, or the pinned `account` alone. When nothing is eligible, the error carries an
 `exclusions` array with each pool member's `account`, `code` and `message`. A
 pinned account reports its own code. Without a pin, when every intent-matching
 member is blocked for the same reason, that reason is the error code, so a pool

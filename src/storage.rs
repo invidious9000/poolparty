@@ -203,7 +203,10 @@ fn eligible(
     }
     if account.product != intent.product
         || !account.pools.contains(&intent.pool)
-        || !account.models.contains(&intent.model)
+        || intent
+            .model
+            .as_deref()
+            .is_some_and(|model| !account.serves(model))
     {
         return Err(Error::new(
             ErrorCode::NoEligibleAccount,
@@ -528,7 +531,10 @@ impl Ledger for SqliteLedger {
                 "pool is not authorized",
             ));
         }
-        if intent.model.trim().is_empty()
+        if intent
+            .model
+            .as_deref()
+            .is_some_and(|model| model.trim().is_empty())
             || intent
                 .effort
                 .as_ref()
@@ -620,6 +626,24 @@ impl Ledger for SqliteLedger {
             .await
     }
 
+    async fn session_binding(
+        &self,
+        principal: &Principal,
+        session: &ClientSessionId,
+    ) -> Result<Option<Binding>> {
+        let principal = principal.clone();
+        let session = session.clone();
+        self.run(move |db| {
+            let binding = get::<Binding>(
+                db,
+                "SELECT data FROM bindings WHERE principal=?1 AND session=?2",
+                params![principal.id.as_str(), session.as_str()],
+            )?;
+            Ok(binding.filter(|binding| principal.pools.contains(&binding.intent.pool)))
+        })
+        .await
+    }
+
     async fn close_binding(
         &self,
         principal: &Principal,
@@ -669,7 +693,8 @@ impl Ledger for SqliteLedger {
             let binding = authorized_binding(&tx, &principal, &admission.binding)?;
             if binding.closed_at.is_some() { return Err(Error::new(ErrorCode::Closed, "binding is closed").bound(&binding.id)); }
             if now < binding.created_at { return Err(invalid("admission precedes binding creation").bound(&binding.id)); }
-            if binding.intent.model != admission.model || binding.intent.effort != admission.effort {
+            if binding.intent.model.as_ref().is_some_and(|model| model != &admission.model)
+                || binding.intent.effort.is_some() && binding.intent.effort != admission.effort {
                 return Err(Error::new(ErrorCode::IntentConflict, "request conflicts with bound intent").bound(&binding.id));
             }
             if let Some(operation) = &admission.operation
@@ -696,6 +721,9 @@ impl Ledger for SqliteLedger {
                 return Err(error);
             }
             let account: Account = get(&tx, "SELECT data FROM accounts WHERE id=?1", [binding.account.as_str()])?.ok_or_else(unavailable)?;
+            if !account.serves(&admission.model) {
+                return Err(Error::new(ErrorCode::NoEligibleAccount, "bound account does not serve the requested model").bound(&binding.id));
+            }
             eligible(&tx, &account, &binding.intent, now).map_err(|error| error.bound(&binding.id))?;
             if credential_floor(&tx, &account.credential.id)? != Some(account.credential.generation) {
                 return Err(Error::new(ErrorCode::CredentialUnavailable, "account credential reference is stale").bound(&binding.id));

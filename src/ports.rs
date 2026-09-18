@@ -31,6 +31,12 @@ pub trait Ledger: Send + Sync {
         now: Timestamp,
     ) -> Result<Binding>;
     async fn binding(&self, principal: &Principal, id: &BindingId) -> Result<Binding>;
+    /// The caller's open or closed binding for a session name, if one exists.
+    async fn session_binding(
+        &self,
+        principal: &Principal,
+        session: &ClientSessionId,
+    ) -> Result<Option<Binding>>;
     async fn close_binding(
         &self,
         principal: &Principal,

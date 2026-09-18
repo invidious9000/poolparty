@@ -141,7 +141,7 @@ fn request(product: Product) -> UpstreamRequest {
             session: ClientSessionId::new("session-a").unwrap(),
             pool: PoolId::new("pool-a").unwrap(),
             product,
-            model: "synthetic-model".into(),
+            model: Some("synthetic-model".into()),
             account: Some(account.id.clone()),
             effort: None,
         },

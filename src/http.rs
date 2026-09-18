@@ -347,9 +347,11 @@ async fn pool_responses(
 /// The drop-in surface: one static base URL per protocol. The native client's
 /// own thread identity selects the session, so a resumed thread lands on the
 /// binding and account it started on without any client-side bookkeeping. The
-/// first request on a thread creates the binding from the request body and the
-/// caller's authorized pools; explicit `/api/v1/sessions` remains available for
-/// callers that want to choose or inspect a binding themselves.
+/// first request on a thread creates an affinity-only binding from the request
+/// body and the caller's authorized pools; model and effort then pass through
+/// per request as long as the bound account serves the model. Explicit
+/// `/api/v1/sessions` remains available for callers that want hard pins or to
+/// choose and inspect a binding themselves.
 async fn pool_model(
     state: Arc<AppState>,
     principal: Principal,
@@ -385,33 +387,46 @@ async fn pool_model(
                     "Request body could not be read within the 2 MiB limit",
                 )
             })?;
-        let (model, effort) = validate_body(protocol, &bytes)?;
+        let (model, _effort) = validate_body(protocol, &bytes)?;
         let session = native_session(&headers, protocol, &bytes)?;
-        let (pool, product) = select_pool(
-            &state,
-            &principal,
-            protocol,
-            &model,
-            pool_pin,
-            account_pin.as_ref(),
-        )
-        .await?;
-        let binding = state
+        // An existing thread keeps its binding; the bound account decides whether
+        // it serves this request's model. Only a new thread selects a pool.
+        let existing = state
             .runtime
             .ledger()
-            .create_binding(
-                &principal,
-                CreateBinding {
-                    session,
-                    pool,
-                    product,
-                    model,
-                    account: account_pin,
-                    effort,
-                },
-                state.runtime.now(),
-            )
+            .session_binding(&principal, &session)
             .await?;
+        let binding = match existing {
+            Some(binding) => binding,
+            None => {
+                let (pool, product) = select_pool(
+                    &state,
+                    &principal,
+                    protocol,
+                    &model,
+                    pool_pin,
+                    account_pin.as_ref(),
+                )
+                .await?;
+                state
+                    .runtime
+                    .ledger()
+                    .create_binding(
+                        &principal,
+                        // Affinity only: model and effort pass through per request.
+                        CreateBinding {
+                            session,
+                            pool,
+                            product,
+                            model: None,
+                            account: account_pin,
+                            effort: None,
+                        },
+                        state.runtime.now(),
+                    )
+                    .await?
+            }
+        };
         let id = binding.id.clone();
         resolved = Some(binding);
         state
@@ -488,7 +503,7 @@ async fn select_pool(
     for account in accounts {
         if !account.enabled
             || account.product.protocol() != protocol
-            || !account.models.contains(model)
+            || !account.serves(model)
             || account_pin.is_some_and(|pin| pin != &account.id)
         {
             continue;

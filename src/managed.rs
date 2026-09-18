@@ -60,6 +60,7 @@ impl ManagedInventory {
             );
             let policy = (account.max_concurrency, account.unknown_capacity);
             if account.model.trim().is_empty()
+                || account.models.iter().any(|model| model.trim().is_empty())
                 || account.max_concurrency == 0
                 || account.product == Product::CodexSubscription
                     && account
@@ -254,7 +255,7 @@ impl ManagedInventory {
             quota_owner: setup.quota_owner.clone(),
             pools: BTreeSet::from([setup.pool.clone()]),
             credential: reference.clone(),
-            models: BTreeSet::from([setup.model.clone()]),
+            models: served_models(setup),
             enabled: true,
         };
         if state.enrolled.get(&setup.id) != Some(&reference) {
@@ -396,7 +397,11 @@ impl RequestPreparation for ManagedInventory {
         if binding.closed_at.is_some()
             || binding.intent.product != setup.product
             || binding.intent.pool != setup.pool
-            || binding.intent.model != setup.model
+            || binding
+                .intent
+                .model
+                .as_deref()
+                .is_some_and(|model| !serves(&served_models(setup), model))
         {
             return Err(Error::new(
                 ErrorCode::NoEligibleAccount,
@@ -405,4 +410,18 @@ impl RequestPreparation for ManagedInventory {
         }
         self.sync_bounded(setup).await.map(|_| ())
     }
+}
+
+/// The models an enrollment serves: its probe model plus any configured extras.
+fn served_models(setup: &LiveAccount) -> BTreeSet<String> {
+    setup
+        .models
+        .iter()
+        .cloned()
+        .chain(std::iter::once(setup.model.clone()))
+        .collect()
+}
+
+fn serves(models: &BTreeSet<String>, model: &str) -> bool {
+    models.contains(ANY_MODEL) || models.contains(model)
 }

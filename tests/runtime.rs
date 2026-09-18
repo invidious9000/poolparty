@@ -84,7 +84,7 @@ async fn fixture() -> Fixture {
                 session: ClientSessionId::new("session-a").unwrap(),
                 pool,
                 product: Product::CodexSubscription,
-                model: "synthetic-model".into(),
+                model: Some("synthetic-model".into()),
                 account: None,
                 effort: None,
             },

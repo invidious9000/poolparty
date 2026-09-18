@@ -768,7 +768,8 @@ async fn drop_in_route_binds_native_threads_without_client_bookkeeping() {
         record.intent.session.as_str(),
         "native-0192aaaa-1111-7bbb-8ccc-dddddddddddd"
     );
-    assert_eq!(record.intent.effort.as_deref(), Some("low"));
+    assert_eq!(record.intent.effort, None);
+    assert_eq!(record.intent.model, None);
     assert_eq!(record.intent.account, None);
 
     // A resumed thread sends the same header and lands on the same binding.
@@ -791,7 +792,7 @@ async fn drop_in_route_binds_native_threads_without_client_bookkeeping() {
     );
     assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 2);
 
-    // Changing the pinned intent on an existing thread is a conflict, never a move.
+    // Effort passes through per request on the same binding; nothing is pinned.
     let mut changed = body.clone();
     changed["reasoning"] = json!({"effort":"high"});
     let response = fixture
@@ -806,10 +807,32 @@ async fn drop_in_route_binds_native_threads_without_client_bookkeeping() {
         ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        drain(response).await["x-poolparty-binding"],
+        binding.as_str()
+    );
+
+    // A model the bound account does not serve is refused on that binding, not moved.
+    let mut other_model = body.clone();
+    other_model["model"] = json!("model-b");
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(pool_request(
+            &fixture,
+            "/v1/responses",
+            "caller-a-token",
+            &thread,
+            other_model,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let error = value(response).await;
-    assert_eq!(error["error"]["code"], "intent_conflict");
+    assert_eq!(error["error"]["code"], "no_eligible_account");
     assert_eq!(error["error"]["binding_id"], binding.as_str());
+    assert_eq!(error["error"]["request_state"], "not_dispatched");
 
     // The session-id header is the fallback; a request with neither is rejected before dispatch.
     let response = fixture
@@ -870,7 +893,7 @@ async fn drop_in_route_binds_native_threads_without_client_bookkeeping() {
             "no_eligible_account"
         );
     }
-    assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]
@@ -1013,4 +1036,70 @@ async fn drop_in_messages_route_derives_the_session_from_metadata() {
         "native-0192bbbb-2222-7ccc-8ddd-eeeeeeeeeeee"
     );
     assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn wildcard_accounts_pass_any_model_through_and_explicit_pins_still_bind() {
+    let fixture = Fixture::new(Product::CodexSubscription, false).await;
+    let mut account = fixture
+        .ledger
+        .accounts(&principal("caller-a", &["pool-a"]))
+        .await
+        .unwrap()
+        .remove(0);
+    account.models.insert("*".into());
+    fixture.ledger.put_account(account).await.unwrap();
+    let thread = [("thread-id", "t-any")];
+    let mut bindings = BTreeSet::new();
+    for model in ["model-a", "model-b", "model-c"] {
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(pool_request(
+                &fixture,
+                "/v1/responses",
+                "caller-a-token",
+                &thread,
+                json!({"model":model, "stream":true, "input":"hello"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        bindings.insert(
+            drain(response).await["x-poolparty-binding"]
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    assert_eq!(bindings.len(), 1);
+
+    // The explicit API without a model is affinity-only too; with a model it is a hard pin.
+    let loose: Binding = serde_json::from_value(
+        value(
+            fixture
+                .request(
+                    "POST",
+                    "/api/v1/sessions",
+                    Some("caller-a-token"),
+                    json!({"session":"loose", "pool":"pool-a", "product":"codex_subscription"}),
+                )
+                .await,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(loose.intent.model, None);
+    let pinned = fixture.create().await;
+    let response = fixture
+        .request(
+            "POST",
+            &fixture.route(&pinned.id),
+            Some("caller-a-token"),
+            json!({"model":"model-b", "stream":true, "input":"hello"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(value(response).await["error"]["code"], "intent_conflict");
+    assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 3);
 }
