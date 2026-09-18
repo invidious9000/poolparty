@@ -284,6 +284,15 @@ pub enum ErrorCode {
     UpstreamUnavailable,
 }
 
+/// Why one account in the requested pool could not serve a new session.
+/// Only accounts within the caller's requested pool are ever reported.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountExclusion {
+    pub account: AccountId,
+    pub code: ErrorCode,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, thiserror::Error, Serialize, Deserialize)]
 #[error("{code:?}: {message}")]
 pub struct Error {
@@ -294,6 +303,9 @@ pub struct Error {
     pub attempt_id: Option<AttemptId>,
     pub binding_preserved: bool,
     pub request_state: DispatchCertainty,
+    /// Per-account reasons when session creation found no eligible account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclusions: Vec<AccountExclusion>,
 }
 
 impl Error {
@@ -305,7 +317,12 @@ impl Error {
             attempt_id: None,
             binding_preserved: false,
             request_state: DispatchCertainty::NotDispatched,
+            exclusions: Vec::new(),
         }
+    }
+    pub fn with_exclusions(mut self, exclusions: Vec<AccountExclusion>) -> Self {
+        self.exclusions = exclusions;
+        self
     }
     pub fn bound(mut self, binding: &BindingId) -> Self {
         self.binding_id = Some(binding.clone());

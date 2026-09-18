@@ -1203,3 +1203,133 @@ async fn account_listing_filters_principal_visibility_and_hides_other_pool_membe
         shared.pools
     );
 }
+
+#[tokio::test]
+async fn session_creation_explains_pool_exclusions_with_the_real_cause() {
+    let fixture = Fixture::new(1).await;
+    let mut second = account("account-b", "owner-b");
+    second.pools = BTreeSet::from([PoolId::new("pool-a").unwrap()]);
+    fixture.ledger.put_account(second).await.unwrap();
+    fixture
+        .ledger
+        .put_quota_policy(policy("owner-b", 1, UnknownCapacityPolicy::Reject))
+        .await
+        .unwrap();
+    let mut exhausted = observation(CapacityStatus::Exhausted, 5, 50);
+    exhausted.owner = QuotaOwnerId::new("owner-b").unwrap();
+    fixture.ledger.observe(exhausted).await.unwrap();
+
+    // Unpinned selection skips the exhausted member and binds the available one.
+    let selected = fixture
+        .ledger
+        .create_binding(&fixture.principal, intent("session-a", None), 10)
+        .await
+        .unwrap();
+    assert_eq!(selected.account.as_str(), "account-a");
+
+    // A pinned exhausted account reports exhaustion, not a generic refusal.
+    let pinned = fixture
+        .ledger
+        .create_binding(
+            &fixture.principal,
+            intent("session-b", Some("account-b")),
+            10,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(pinned.code, ErrorCode::SessionQuotaExhausted);
+    assert_eq!(pinned.exclusions.len(), 1);
+    assert_eq!(pinned.exclusions[0].account.as_str(), "account-b");
+    assert_eq!(pinned.exclusions[0].code, ErrorCode::SessionQuotaExhausted);
+    assert!(!pinned.binding_preserved);
+
+    // A pin to an account outside the pool never reveals other inventory.
+    let missing = fixture
+        .ledger
+        .create_binding(
+            &fixture.principal,
+            intent("session-c", Some("account-z")),
+            10,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, ErrorCode::NoEligibleAccount);
+    assert!(missing.exclusions.is_empty());
+
+    // Every matching member exhausted promotes the shared cause to the error code.
+    fixture
+        .ledger
+        .observe(observation(CapacityStatus::Exhausted, 6, 50))
+        .await
+        .unwrap();
+    let all_exhausted = fixture
+        .ledger
+        .create_binding(&fixture.principal, intent("session-d", None), 10)
+        .await
+        .unwrap_err();
+    assert_eq!(all_exhausted.code, ErrorCode::SessionQuotaExhausted);
+    let mut excluded: Vec<_> = all_exhausted
+        .exclusions
+        .iter()
+        .map(|exclusion| (exclusion.account.as_str(), exclusion.code))
+        .collect();
+    excluded.sort_by_key(|(account, _)| *account);
+    assert_eq!(
+        excluded,
+        vec![
+            ("account-a", ErrorCode::SessionQuotaExhausted),
+            ("account-b", ErrorCode::SessionQuotaExhausted),
+        ]
+    );
+
+    // Mixed causes keep the generic code but attach each account's reason.
+    fixture
+        .ledger
+        .put_quota_policy(policy("owner-a", 1, UnknownCapacityPolicy::Reject))
+        .await
+        .unwrap();
+    let mut unknown = observation(CapacityStatus::Unknown, 7, 50);
+    unknown.owner = QuotaOwnerId::new("owner-a").unwrap();
+    fixture.ledger.observe(unknown).await.unwrap();
+    let mixed = fixture
+        .ledger
+        .create_binding(&fixture.principal, intent("session-e", None), 10)
+        .await
+        .unwrap_err();
+    assert_eq!(mixed.code, ErrorCode::NoEligibleAccount);
+    let mut codes: Vec<_> = mixed
+        .exclusions
+        .iter()
+        .map(|exclusion| exclusion.code)
+        .collect();
+    codes.sort_by_key(|code| format!("{code:?}"));
+    assert_eq!(
+        codes,
+        vec![ErrorCode::CapacityUnknown, ErrorCode::SessionQuotaExhausted]
+    );
+
+    // A disabled member says so, and a model mismatch stays a plain intent miss.
+    let mut disabled = account("account-a", "owner-a");
+    disabled.enabled = false;
+    fixture.ledger.put_account(disabled).await.unwrap();
+    let mut wrong_model = intent("session-f", None);
+    wrong_model.model = "model-z".to_owned();
+    let unmatched = fixture
+        .ledger
+        .create_binding(&fixture.principal, wrong_model, 10)
+        .await
+        .unwrap_err();
+    assert_eq!(unmatched.code, ErrorCode::NoEligibleAccount);
+    let messages: BTreeSet<_> = unmatched
+        .exclusions
+        .iter()
+        .map(|exclusion| exclusion.message.as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        BTreeSet::from([
+            "account is disabled",
+            "account does not satisfy session intent"
+        ])
+    );
+}

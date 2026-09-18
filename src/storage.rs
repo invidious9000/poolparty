@@ -195,8 +195,13 @@ fn eligible(
     intent: &CreateBinding,
     now: Timestamp,
 ) -> Result<()> {
-    if !account.enabled
-        || account.product != intent.product
+    if !account.enabled {
+        return Err(Error::new(
+            ErrorCode::NoEligibleAccount,
+            "account is disabled",
+        ));
+    }
+    if account.product != intent.product
         || !account.pools.contains(&intent.pool)
         || !account.models.contains(&intent.model)
     {
@@ -255,6 +260,52 @@ fn eligible(
         ));
     }
     Ok(())
+}
+
+/// Explain why no account in the requested pool could open a session.
+///
+/// A pinned account reports its own reason. Without a pin, every enrolled pool
+/// member that matches the intent but is blocked by capacity or concurrency is
+/// an applicable exclusion; when all of them fail for one reason, that reason
+/// becomes the error code so callers can distinguish waiting for a reset from
+/// operator action. Mixed reasons keep `no_eligible_account` with each account's
+/// exclusion attached.
+fn no_eligible_account(intent: &CreateBinding, exclusions: Vec<AccountExclusion>) -> Error {
+    if let Some(pinned) = &intent.account {
+        return match exclusions
+            .iter()
+            .find(|exclusion| &exclusion.account == pinned)
+        {
+            Some(exclusion) => {
+                Error::new(exclusion.code, exclusion.message.clone()).with_exclusions(exclusions)
+            }
+            None => Error::new(
+                ErrorCode::NoEligibleAccount,
+                "requested account is not enrolled in this pool",
+            ),
+        };
+    }
+    if exclusions.is_empty() {
+        return Error::new(ErrorCode::NoEligibleAccount, "pool has no enrolled account");
+    }
+    let mut applicable = exclusions
+        .iter()
+        .filter(|exclusion| exclusion.code != ErrorCode::NoEligibleAccount);
+    let error = match applicable.next() {
+        Some(first) if applicable.all(|other| other.code == first.code) => Error::new(
+            first.code,
+            format!("every matching account in the pool: {}", first.message),
+        ),
+        Some(_) => Error::new(
+            ErrorCode::NoEligibleAccount,
+            "matching accounts in the pool are blocked for different reasons",
+        ),
+        None => Error::new(
+            ErrorCode::NoEligibleAccount,
+            "no enrolled account in the pool matches the session intent",
+        ),
+    };
+    error.with_exclusions(exclusions)
 }
 
 fn load_attempt(db: &Connection, id: &AttemptId) -> Result<Attempt> {
@@ -514,6 +565,7 @@ impl Ledger for SqliteLedger {
             }
             let candidates: Vec<Account> = all(&tx, "SELECT data FROM accounts ORDER BY id", [])?;
             let mut selected = None;
+            let mut exclusions = Vec::new();
             for account in candidates {
                 if intent.account.as_ref().is_some_and(|id| id != &account.id) {
                     continue;
@@ -524,11 +576,18 @@ impl Ledger for SqliteLedger {
                         break;
                     }
                     Err(error) if error.code == ErrorCode::StorageUnavailable => return Err(error),
+                    // Accounts outside the requested pool are invisible to this caller.
+                    Err(error) if account.pools.contains(&intent.pool) => {
+                        exclusions.push(AccountExclusion {
+                            account: account.id,
+                            code: error.code,
+                            message: error.message,
+                        });
+                    }
                     Err(_) => (),
                 }
             }
-            let account = selected
-                .ok_or_else(|| Error::new(ErrorCode::NoEligibleAccount, "no eligible account"))?;
+            let account = selected.ok_or_else(|| no_eligible_account(&intent, exclusions))?;
             let binding = Binding {
                 id: BindingId::new(Uuid::new_v4().to_string()).map_err(|_| unavailable())?,
                 principal: principal.id,

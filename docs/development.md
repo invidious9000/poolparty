@@ -63,6 +63,17 @@ operation never dispatches again; its error identifies the existing attempt for
 `GET /api/v1/attempts/{id}`. Session creation and inference have separate identity.
 Resume uses `GET /api/v1/sessions/{id}` and the same bound route.
 
+Session creation selects the first eligible account in the pool by account ID,
+or the pinned `account` alone. When nothing is eligible, the error carries an
+`exclusions` array with each pool member's `account`, `code` and `message`. A
+pinned account reports its own code. Without a pin, when every intent-matching
+member is blocked for the same reason, that reason is the error code, so a pool
+whose members are all quota-exhausted returns `session_quota_exhausted` with
+HTTP 429. Mixed or purely structural reasons (disabled, wrong product or model)
+return `no_eligible_account`. A pin to an account outside the pool returns
+`no_eligible_account` without exclusions. Accounts outside the requested pool
+are never listed.
+
 ## Implemented boundaries
 
 - Caller/pool isolation, immutable session intent, explicit close and tombstones.

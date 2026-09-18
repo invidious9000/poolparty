@@ -647,3 +647,50 @@ async fn post_header_failure_interrupts_the_body_and_fences_resume() {
     assert_eq!(value(response).await["error"]["code"], "session_uncertain");
     assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn session_creation_reports_pool_exhaustion_with_exclusions() {
+    let fixture = Fixture::new(Product::CodexSubscription, false).await;
+    fixture
+        .ledger
+        .observe(UsageObservation {
+            owner: QuotaOwnerId::new("quota-a").unwrap(),
+            observed_at: 90,
+            valid_until: 1000,
+            status: CapacityStatus::Exhausted,
+            windows: vec![],
+            balances: vec![],
+            source: "synthetic".into(),
+            provider_available: None,
+        })
+        .await
+        .unwrap();
+    for pinned in [Value::Null, json!("account-a")] {
+        let mut intent = fixture.intent();
+        intent["account"] = pinned;
+        let response = fixture
+            .request("POST", "/api/v1/sessions", Some("caller-a-token"), intent)
+            .await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = value(response).await;
+        assert_eq!(body["error"]["code"], "session_quota_exhausted");
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(body["error"]["binding_id"], Value::Null);
+        assert_eq!(body["error"]["binding_preserved"], false);
+        assert_eq!(body["error"]["request_state"], "not_dispatched");
+        assert_eq!(
+            body["error"]["exclusions"],
+            json!([{"account":"account-a","code":"session_quota_exhausted","message":"account quota is exhausted"}])
+        );
+    }
+    let mut intent = fixture.intent();
+    intent["account"] = json!("account-b");
+    let response = fixture
+        .request("POST", "/api/v1/sessions", Some("caller-a-token"), intent)
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = value(response).await;
+    assert_eq!(body["error"]["code"], "no_eligible_account");
+    assert!(body["error"].get("exclusions").is_none());
+    assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 0);
+}
