@@ -80,8 +80,10 @@ model the bound account does not serve is refused on that binding as
 responses after binding carry `x-poolparty-binding` and `x-poolparty-account`
 headers. When several authorized pools serve the model,
 the caller sets `x-poolparty-pool`; `x-poolparty-account` pins one account.
-Requests without any session identity are rejected before dispatch. The
-explicit session API below remains for callers that choose or inspect bindings.
+Requests without any session identity are rejected before dispatch. A thread
+carrying `x-codex-parent-thread-id` binds to its parent's account and pool when
+that parent is already bound, so one task stays on one account. The explicit
+session API below remains for callers that choose or inspect bindings.
 
 On the explicit session API, `model` and `effort` are optional hard pins: when
 present, every request on that binding must match them; when absent, requests
@@ -110,7 +112,10 @@ are never listed.
   never-dispatched reservations and fences possibly sent work as uncertain.
 - No automatic transport retries, redirects, provider fallback or rebinding.
 - Terminal SSE bytes carry completion evidence; the ledger settles before those
-  bytes reach the caller. Partial EOF and disconnect preserve uncertain pressure.
+  bytes reach the caller. A disconnected client does not stop the drain: the
+  upstream stream is read to its terminal event and settled on that evidence.
+  Partial EOF preserves uncertain pressure, and admin grants can list and
+  resolve uncertain attempts with a recorded rationale.
 - Bounded bodies/SSE frames, redacted secret types and response-header allowlists.
 - Codex-only handling for successful SSE responses missing `Content-Type`:
   downstream metadata becomes `text/event-stream`, while strict frame/terminal

@@ -173,6 +173,9 @@ pub struct UsageObservation {
 pub struct Principal {
     pub id: PrincipalId,
     pub pools: BTreeSet<PoolId>,
+    /// Operator scope over the listed pools: list and resolve other principals'
+    /// attempts and bindings there. Never widens inference authorization.
+    pub admin: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +251,18 @@ pub struct Attempt {
     pub state: AttemptState,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+    /// Present only when an operator resolved an uncertain attempt by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<AttemptResolution>,
+}
+
+/// An operator's explicit acceptance of residual risk for an uncertain attempt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptResolution {
+    pub principal: PrincipalId,
+    pub outcome: Settlement,
+    pub rationale: String,
+    pub resolved_at: Timestamp,
 }
 
 #[derive(Clone, Debug)]
@@ -266,7 +281,8 @@ pub struct PreparedAttempt {
     pub account: Account,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Settlement {
     Succeeded,
     Rejected,
@@ -278,6 +294,7 @@ pub enum Settlement {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     Unauthorized,
+    Forbidden,
     NotFound,
     Closed,
     IntentConflict,

@@ -225,49 +225,94 @@ impl Router {
             mut stream,
         } = upstream;
         let error_attempt = id.clone();
-        let output = async_stream::stream! {
+        // The drain task, not the HTTP response, owns the attempt's lifecycle. A
+        // client that disconnects stops receiving bytes, but the upstream stream is
+        // still read to its terminal event so the attempt settles on provider
+        // evidence instead of becoming uncertain. The transport's own request
+        // timeout bounds that drain; an aborted task still settles uncertain.
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<Result<Bytes>>(64);
+        let ownership = self.ownership.clone();
+        tokio::spawn(async move {
+            let _ownership = ownership;
+            let mut guard = guard;
+            let error_attempt = error_attempt;
+            let binding_id = binding_id;
             while let Some(event) = stream.next().await {
                 match event {
-                    Ok(StreamEvent::Data(bytes)) => yield Ok(bytes),
+                    Ok(StreamEvent::Data(bytes)) => {
+                        let _ = sender.send(Ok(bytes)).await;
+                    }
                     Ok(StreamEvent::Terminal { bytes, outcome }) => {
                         if !matches!(outcome, Settlement::Succeeded | Settlement::Rejected) {
-                            let error = uncertain_error(Error::new(ErrorCode::UpstreamUnavailable, "Invalid upstream completion signal."), &binding_id).with_attempt(&error_attempt);
-                            yield Err(error);
+                            let error = uncertain_error(
+                                Error::new(
+                                    ErrorCode::UpstreamUnavailable,
+                                    "Invalid upstream completion signal.",
+                                ),
+                                &binding_id,
+                            )
+                            .with_attempt(&error_attempt);
+                            let _ = sender.send(Err(error)).await;
                             return;
                         }
                         if let Err(error) = guard.finish(outcome).await {
-                            yield Err(uncertain_error(error, &binding_id).with_attempt(&error_attempt));
+                            let _ = sender
+                                .send(Err(uncertain_error(error, &binding_id)
+                                    .with_attempt(&error_attempt)))
+                                .await;
                             return;
                         }
-                        yield Ok(bytes);
+                        let _ = sender.send(Ok(bytes)).await;
                         return;
                     }
                     Ok(StreamEvent::Finished(outcome)) => {
                         if !matches!(outcome, Settlement::Succeeded | Settlement::Rejected) {
-                            let mut e = Error::new(ErrorCode::UpstreamUnavailable, "Invalid upstream completion signal.").bound(&binding_id).with_attempt(&error_attempt);
+                            let mut e = Error::new(
+                                ErrorCode::UpstreamUnavailable,
+                                "Invalid upstream completion signal.",
+                            )
+                            .bound(&binding_id)
+                            .with_attempt(&error_attempt);
                             e.request_state = DispatchCertainty::Unknown;
-                            yield Err(e);
+                            let _ = sender.send(Err(e)).await;
                             return;
                         }
                         if let Err(error) = guard.finish(outcome).await {
-                            yield Err(uncertain_error(error, &binding_id).with_attempt(&error_attempt));
-                            return;
+                            let _ = sender
+                                .send(Err(uncertain_error(error, &binding_id)
+                                    .with_attempt(&error_attempt)))
+                                .await;
                         }
                         return;
                     }
                     Err(_) => {
                         let _ = guard.finish(Settlement::Uncertain).await;
-                        let mut error = Error::new(ErrorCode::UpstreamUnavailable, "Upstream stream interrupted; execution remains uncertain.").bound(&binding_id).with_attempt(&error_attempt);
+                        let mut error = Error::new(
+                            ErrorCode::UpstreamUnavailable,
+                            "Upstream stream interrupted; execution remains uncertain.",
+                        )
+                        .bound(&binding_id)
+                        .with_attempt(&error_attempt);
                         error.request_state = DispatchCertainty::Unknown;
-                        yield Err(error);
+                        let _ = sender.send(Err(error)).await;
                         return;
                     }
                 }
             }
             let _ = guard.finish(Settlement::Uncertain).await;
-            let mut error = Error::new(ErrorCode::UpstreamUnavailable, "Upstream ended without a confirmed terminal event.").bound(&binding_id).with_attempt(&error_attempt);
+            let mut error = Error::new(
+                ErrorCode::UpstreamUnavailable,
+                "Upstream ended without a confirmed terminal event.",
+            )
+            .bound(&binding_id)
+            .with_attempt(&error_attempt);
             error.request_state = DispatchCertainty::Unknown;
-            yield Err(error);
+            let _ = sender.send(Err(error)).await;
+        });
+        let output = async_stream::stream! {
+            while let Some(item) = receiver.recv().await {
+                yield item;
+            }
         };
         Ok(RoutedResponse {
             status,

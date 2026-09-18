@@ -96,6 +96,7 @@ fn principal(id: &str, pools: &[&str]) -> Principal {
     Principal {
         id: PrincipalId::new(id).unwrap(),
         pools: pools.iter().map(|s| PoolId::new(*s).unwrap()).collect(),
+        admin: false,
     }
 }
 fn grants() -> BearerGrants {
@@ -1102,4 +1103,201 @@ async fn wildcard_accounts_pass_any_model_through_and_explicit_pins_still_bind()
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(value(response).await["error"]["code"], "intent_conflict");
     assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 3);
+}
+
+fn admin_grants() -> BearerGrants {
+    let mut operator = principal("operator", &["pool-a"]);
+    operator.admin = true;
+    BearerGrants::new(vec![
+        (
+            SecretValue::new("caller-a-token".into()),
+            principal("caller-a", &["pool-a"]),
+        ),
+        (SecretValue::new("operator-token".into()), operator),
+    ])
+    .unwrap()
+}
+
+#[tokio::test]
+async fn operators_list_and_resolve_uncertain_attempts_over_http() {
+    let mut fixture = Fixture::new(Product::CodexSubscription, true).await;
+    fixture.app = app(
+        Arc::new(Router::new(
+            fixture.ledger.clone(),
+            fixture.transport.clone(),
+            Arc::new(Credentials),
+            Arc::new(FixedClock),
+        )),
+        admin_grants(),
+    );
+    let binding = fixture.create().await;
+    // A failing stream leaves the attempt uncertain and fences the binding.
+    let response = fixture
+        .request(
+            "POST",
+            &fixture.route(&binding.id),
+            Some("caller-a-token"),
+            model_body(),
+        )
+        .await;
+    let attempt = response.headers()["x-poolparty-attempt-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let _ = to_bytes(response.into_body(), 4096).await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let body = value(
+                fixture
+                    .request(
+                        "GET",
+                        "/api/v1/attempts?state=uncertain",
+                        Some("operator-token"),
+                        Value::Null,
+                    )
+                    .await,
+            )
+            .await;
+            if body["attempts"]
+                .as_array()
+                .is_some_and(|list| list.len() == 1)
+            {
+                assert_eq!(body["attempts"][0]["id"], attempt.as_str());
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let sessions = value(
+        fixture
+            .request(
+                "GET",
+                "/api/v1/sessions?open=true",
+                Some("operator-token"),
+                Value::Null,
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(sessions["sessions"][0]["id"], binding.id.as_str());
+
+    // The owner cannot resolve; the operator can, once, with a rationale.
+    let path = format!("/api/v1/attempts/{attempt}/resolve");
+    let body =
+        json!({"outcome":"rejected","rationale":"upstream request log shows an early abort"});
+    let response = fixture
+        .request("POST", &path, Some("caller-a-token"), body.clone())
+        .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = fixture
+        .request(
+            "POST",
+            &path,
+            Some("operator-token"),
+            json!({"outcome":"rejected"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = fixture
+        .request("POST", &path, Some("operator-token"), body.clone())
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let resolved = value(response).await;
+    assert_eq!(resolved["state"], "rejected");
+    assert_eq!(resolved["resolution"]["principal"], "operator");
+    let response = fixture
+        .request("POST", &path, Some("operator-token"), body)
+        .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    // The thread is usable again for its owner.
+    let response = fixture
+        .request(
+            "POST",
+            &fixture.route(&binding.id),
+            Some("caller-a-token"),
+            model_body(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn subagent_threads_follow_their_parent_account() {
+    let fixture = Fixture::new(Product::CodexSubscription, false).await;
+    let body = json!({"model":"model-a", "stream":true, "input":"hello"});
+    let parent = "0192cccc-3333-7ddd-8eee-ffffffffffff";
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(pool_request(
+            &fixture,
+            "/v1/responses",
+            "caller-a-token",
+            &[("thread-id", parent)],
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    drain(response).await;
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(pool_request(
+            &fixture,
+            "/v1/responses",
+            "caller-a-token",
+            &[
+                ("thread-id", "child-1"),
+                ("x-codex-parent-thread-id", parent),
+            ],
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let child = drain(response).await["x-poolparty-binding"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let record: Binding = serde_json::from_value(
+        value(
+            fixture
+                .request(
+                    "GET",
+                    &format!("/api/v1/sessions/{child}"),
+                    Some("caller-a-token"),
+                    Value::Null,
+                )
+                .await,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(
+        record.intent.account.as_ref().unwrap().as_str(),
+        "account-a"
+    );
+    assert_eq!(record.intent.session.as_str(), "native-child-1");
+    // An unknown parent is ignored rather than refused.
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(pool_request(
+            &fixture,
+            "/v1/responses",
+            "caller-a-token",
+            &[
+                ("thread-id", "child-2"),
+                ("x-codex-parent-thread-id", "never-bound"),
+            ],
+            body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    drain(response).await;
 }

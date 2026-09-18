@@ -95,6 +95,7 @@ impl Fixture {
             principal: Principal {
                 id: PrincipalId::new("principal-a").unwrap(),
                 pools: BTreeSet::from([PoolId::new("pool-a").unwrap()]),
+                admin: false,
             },
         }
     }
@@ -203,10 +204,12 @@ async fn principal_and_revoked_pool_cannot_discover_bindings_or_attempts() {
     let foreign = Principal {
         id: PrincipalId::new("principal-b").unwrap(),
         pools: fixture.principal.pools.clone(),
+        admin: false,
     };
     let revoked = Principal {
         id: fixture.principal.id.clone(),
         pools: BTreeSet::new(),
+        admin: false,
     };
     for principal in [&foreign, &revoked] {
         let error = fixture
@@ -1178,6 +1181,7 @@ async fn account_listing_filters_principal_visibility_and_hides_other_pool_membe
     let other = Principal {
         id: PrincipalId::new("principal-b").unwrap(),
         pools: BTreeSet::from([PoolId::new("pool-b").unwrap()]),
+        admin: false,
     };
     let visible = fixture.ledger.accounts(&other).await.unwrap();
     assert_eq!(visible.len(), 2);
@@ -1190,12 +1194,14 @@ async fn account_listing_filters_principal_visibility_and_hides_other_pool_membe
     let revoked = Principal {
         id: fixture.principal.id.clone(),
         pools: BTreeSet::new(),
+        admin: false,
     };
     assert!(fixture.ledger.accounts(&revoked).await.unwrap().is_empty());
     // Listing is a projection; it must not delete hidden memberships in storage.
     let both = Principal {
         id: PrincipalId::new("operator").unwrap(),
         pools: shared.pools.clone(),
+        admin: false,
     };
     let visible = fixture.ledger.accounts(&both).await.unwrap();
     assert_eq!(
@@ -1336,4 +1342,146 @@ async fn session_creation_explains_pool_exclusions_with_the_real_cause() {
             "account does not satisfy session intent"
         ])
     );
+}
+
+#[tokio::test]
+async fn admins_list_and_resolve_uncertain_attempts_across_principals_in_their_pools() {
+    let fixture = Fixture::new(2).await;
+    let binding = fixture.bind("session-a").await;
+    let prepared = fixture
+        .ledger
+        .admit(&fixture.principal, admission(&binding, None), 20)
+        .await
+        .unwrap();
+    fixture
+        .ledger
+        .mark_dispatching(&prepared.attempt.id, 21)
+        .await
+        .unwrap();
+    fixture
+        .ledger
+        .settle(&prepared.attempt.id, Settlement::Uncertain, 22)
+        .await
+        .unwrap();
+    let admin = Principal {
+        id: PrincipalId::new("operator").unwrap(),
+        pools: BTreeSet::from([PoolId::new("pool-a").unwrap()]),
+        admin: true,
+    };
+    let elsewhere = Principal {
+        id: PrincipalId::new("operator-b").unwrap(),
+        pools: BTreeSet::from([PoolId::new("pool-b").unwrap()]),
+        admin: true,
+    };
+    let stranger = Principal {
+        id: PrincipalId::new("stranger").unwrap(),
+        pools: BTreeSet::from([PoolId::new("pool-a").unwrap()]),
+        admin: false,
+    };
+
+    // Listing: the owner and the pool admin see it, a same-pool stranger and an
+    // admin of another pool do not.
+    let uncertain = |principal: &Principal| {
+        let ledger = &fixture.ledger;
+        let principal = principal.clone();
+        async move {
+            ledger
+                .attempts(&principal, Some(AttemptState::Uncertain), 50, 0)
+                .await
+                .unwrap()
+                .len()
+        }
+    };
+    assert_eq!(uncertain(&fixture.principal).await, 1);
+    assert_eq!(uncertain(&admin).await, 1);
+    assert_eq!(uncertain(&stranger).await, 0);
+    assert_eq!(uncertain(&elsewhere).await, 0);
+    assert_eq!(
+        fixture
+            .ledger
+            .attempts(&admin, Some(AttemptState::Succeeded), 50, 0)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        fixture.ledger.bindings(&admin, true, 50, 0).await.unwrap()[0].id,
+        binding.id
+    );
+    assert!(
+        fixture
+            .ledger
+            .bindings(&elsewhere, true, 50, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Resolution: admin only, uncertain only, rationale required, recorded on the attempt.
+    let resolve = |principal: &Principal, outcome, rationale: &str| {
+        let ledger = &fixture.ledger;
+        let (principal, rationale) = (principal.clone(), rationale.to_owned());
+        let id = prepared.attempt.id.clone();
+        async move {
+            ledger
+                .resolve_attempt(&principal, &id, outcome, rationale, 30)
+                .await
+        }
+    };
+    assert_eq!(
+        resolve(&fixture.principal, Settlement::Succeeded, "owner tried")
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Forbidden
+    );
+    assert_eq!(
+        resolve(&elsewhere, Settlement::Succeeded, "wrong pool")
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    );
+    assert_eq!(
+        resolve(&admin, Settlement::Uncertain, "not terminal")
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidInput
+    );
+    assert_eq!(
+        resolve(&admin, Settlement::Succeeded, "   ")
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidInput
+    );
+    let resolved = resolve(
+        &admin,
+        Settlement::Rejected,
+        "provider log shows no completion",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resolved.state, AttemptState::Rejected);
+    let resolution = resolved.resolution.unwrap();
+    assert_eq!(resolution.principal.as_str(), "operator");
+    assert_eq!(resolution.outcome, Settlement::Rejected);
+    assert_eq!(resolution.resolved_at, 30);
+    assert_eq!(
+        resolve(&admin, Settlement::Succeeded, "again")
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidTransition
+    );
+
+    // Capacity and the session are released by the resolution.
+    assert_eq!(uncertain(&admin).await, 0);
+    fixture
+        .ledger
+        .admit(&fixture.principal, admission(&binding, None), 40)
+        .await
+        .unwrap();
 }

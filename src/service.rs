@@ -56,6 +56,9 @@ pub struct GrantConfig {
     pub pools: BTreeSet<PoolId>,
     /// Names only. Values are obtained from POOLPARTY_GRANT_* environment variables.
     pub token_env: String,
+    /// Operator scope over the listed pools; see `Principal::admin`.
+    #[serde(default)]
+    pub admin: bool,
 }
 
 impl ServeConfig {
@@ -125,6 +128,7 @@ impl ServeConfig {
                 Principal {
                     id: configured.principal.clone(),
                     pools: configured.pools.clone(),
+                    admin: configured.admin,
                 },
             ));
         }

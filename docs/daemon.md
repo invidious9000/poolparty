@@ -59,7 +59,8 @@ configuration outside this public checkout. These values are synthetic examples:
 ```
 
 Supply `POOLPARTY_OP_SERVICE_ACCOUNT_TOKEN` through the operator's secret delivery
-mechanism. Each caller grant comes from its named `POOLPARTY_GRANT_*` variable and
+mechanism. A grant may set `"admin": true` for operator listing and resolution
+scope over its pools. Each caller grant comes from its named `POOLPARTY_GRANT_*` variable and
 must contain at least 32 visible ASCII characters. Provider tokens remain in the
 vault; neither a grant nor the configuration carries them to callers. Caller and
 vault service tokens must be different. Multiple caller tokens may represent the
@@ -135,6 +136,24 @@ The same binding exposes:
 | Responses stream | `POST /routes/BINDING_ID/codex/responses` |
 | Messages stream | `POST /routes/BINDING_ID/v1/messages` |
 | Attempt outcome | `GET /api/v1/attempts/ATTEMPT_ID` |
+| List attempts | `GET /api/v1/attempts?state=uncertain&limit=50&offset=0` |
+| List sessions | `GET /api/v1/sessions?open=true&limit=50&offset=0` |
+| Resolve an uncertain attempt | `POST /api/v1/attempts/ATTEMPT_ID/resolve` |
+
+Lists are bounded pages ordered by ID; pool filtering happens after the page is
+cut, so a short page is not the end. Continue with the offset until a page is
+empty. A grant with `"admin": true` sees every principal's attempts and sessions
+in its pools and may resolve uncertain attempts; it gains no inference rights.
+Resolution takes `{"outcome":"succeeded"|"rejected","rationale":"..."}`, applies
+only to an uncertain attempt, records the principal, outcome, rationale and time
+on the attempt, and releases the session and its capacity claim. It is the
+operator's explicit acceptance of residual risk, never automatic.
+
+A client that disconnects mid-stream stops receiving bytes, but the daemon keeps
+reading the upstream stream to its terminal event and settles the attempt on that
+evidence. The transport's request timeout bounds that drain. An upstream that ends
+without a terminal event, or a daemon restart mid-stream, still leaves the
+attempt uncertain.
 
 The protocol must match the bound product. Custom callers should provide a unique
 `x-poolparty-operation-id` for each intended inference operation. A repeated ID

@@ -183,6 +183,7 @@ pub async fn seed_demo(
         Principal {
             id: PrincipalId::new("demo-client").expect("constant ID"),
             pools: BTreeSet::from([pool]),
+            admin: false,
         },
         MemoryCredentials::new(secrets)?,
     ))

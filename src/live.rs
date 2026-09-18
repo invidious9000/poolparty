@@ -214,6 +214,7 @@ pub async fn run(
             let principal = Principal {
                 id: PrincipalId::new("operator-check").expect("constant"),
                 pools: BTreeSet::from([setup.pool.clone()]),
+                admin: false,
             };
             let session = ClientSessionId::new(uuid::Uuid::new_v4().to_string()).expect("UUID");
             let created = ledger

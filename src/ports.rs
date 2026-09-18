@@ -54,6 +54,33 @@ pub trait Ledger: Send + Sync {
     async fn mark_streaming(&self, id: &AttemptId, now: Timestamp) -> Result<()>;
     async fn settle(&self, id: &AttemptId, outcome: Settlement, now: Timestamp) -> Result<Attempt>;
     async fn attempt(&self, principal: &Principal, id: &AttemptId) -> Result<Attempt>;
+    /// Bounded page of attempts visible to the principal, optionally in one state.
+    /// Pool filtering happens after the page is cut, so a page can be short;
+    /// callers continue with the offset until a page comes back empty.
+    async fn attempts(
+        &self,
+        principal: &Principal,
+        state: Option<AttemptState>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Attempt>>;
+    /// Bounded page of bindings visible to the principal, open ones only when asked.
+    async fn bindings(
+        &self,
+        principal: &Principal,
+        open_only: bool,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Binding>>;
+    /// An admin principal settles one uncertain attempt, recording who and why.
+    async fn resolve_attempt(
+        &self,
+        principal: &Principal,
+        id: &AttemptId,
+        outcome: Settlement,
+        rationale: String,
+        now: Timestamp,
+    ) -> Result<Attempt>;
     /// Startup under exclusive process ownership: release reserved, fence possibly sent work.
     async fn recover(&self, now: Timestamp) -> Result<()>;
 }

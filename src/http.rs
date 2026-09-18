@@ -1,10 +1,14 @@
 //! Authenticated control and native streaming routes. Static grants are a local scaffold.
-use std::{collections::BTreeSet, fmt, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt,
+    sync::Arc,
+};
 
 use axum::{
     Extension, Json, Router as HttpRouter,
     body::{Body, to_bytes},
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -92,10 +96,12 @@ pub fn app(runtime: Arc<Router>, grants: BearerGrants) -> HttpRouter {
     let state = Arc::new(AppState { runtime, grants });
     let protected = HttpRouter::new()
         .route("/api/v1/accounts", get(inspect_accounts))
-        .route("/api/v1/sessions", post(create_binding))
+        .route("/api/v1/sessions", post(create_binding).get(list_bindings))
         .route("/api/v1/sessions/{id}", get(inspect_binding))
         .route("/api/v1/sessions/{id}/close", post(close_binding))
+        .route("/api/v1/attempts", get(list_attempts))
         .route("/api/v1/attempts/{id}", get(inspect_attempt))
+        .route("/api/v1/attempts/{id}/resolve", post(resolve_attempt))
         .route("/v1/messages", any(pool_messages))
         .route("/v1/responses", any(pool_responses))
         .route("/routes/{id}/v1/messages", any(messages))
@@ -312,6 +318,111 @@ async fn inspect_attempt(
     }
 }
 
+fn page(query: &HashMap<String, String>) -> Result<(u32, u32)> {
+    let number = |key: &str, default: u32| -> Result<u32> {
+        match query.get(key) {
+            None => Ok(default),
+            Some(value) => value
+                .parse::<u32>()
+                .map_err(|_| Error::new(ErrorCode::InvalidInput, "Invalid page parameter")),
+        }
+    };
+    Ok((number("limit", 50)?, number("offset", 0)?))
+}
+
+async fn list_attempts(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<Principal>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let result = async {
+        let (limit, offset) = page(&query)?;
+        let state_filter = match query.get("state").map(String::as_str) {
+            None => None,
+            Some(value) => Some(
+                serde_json::from_value::<AttemptState>(json!(value))
+                    .map_err(|_| Error::new(ErrorCode::InvalidInput, "Invalid attempt state"))?,
+            ),
+        };
+        state
+            .runtime
+            .ledger()
+            .attempts(&principal, state_filter, limit, offset)
+            .await
+    }
+    .await;
+    match result {
+        Ok(attempts) => Json(json!({"attempts": attempts})).into_response(),
+        Err(e) => error_response(e, Protocol::Responses),
+    }
+}
+
+async fn list_bindings(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<Principal>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let result = async {
+        let (limit, offset) = page(&query)?;
+        let open_only = query.get("open").map(String::as_str) == Some("true");
+        state
+            .runtime
+            .ledger()
+            .bindings(&principal, open_only, limit, offset)
+            .await
+    }
+    .await;
+    match result {
+        Ok(bindings) => Json(json!({"sessions": bindings})).into_response(),
+        Err(e) => error_response(e, Protocol::Responses),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveAttempt {
+    outcome: Settlement,
+    rationale: String,
+}
+
+async fn resolve_attempt(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<Principal>,
+    Path(id): Path<String>,
+    request: Request,
+) -> Response {
+    let result = async {
+        let id = AttemptId::new(id)
+            .map_err(|_| Error::new(ErrorCode::InvalidInput, "Invalid attempt ID"))?;
+        let bytes = to_bytes(request.into_body(), BODY_LIMIT)
+            .await
+            .map_err(|_| {
+                Error::new(
+                    ErrorCode::InvalidInput,
+                    "Request body could not be read within the 2 MiB limit",
+                )
+            })?;
+        let body: ResolveAttempt = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::new(ErrorCode::InvalidInput, "Invalid resolution request"))?;
+        state
+            .runtime
+            .ledger()
+            .resolve_attempt(
+                &principal,
+                &id,
+                body.outcome,
+                body.rationale,
+                state.runtime.now(),
+            )
+            .await
+    }
+    .await;
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(e) => error_response(e, Protocol::Responses),
+    }
+}
+
 async fn messages(
     State(state): State<Arc<AppState>>,
     Extension(principal): Extension<Principal>,
@@ -396,18 +507,45 @@ async fn pool_model(
             .ledger()
             .session_binding(&principal, &session)
             .await?;
+        // A subagent thread follows its parent's account so one task's quota use
+        // and failure modes stay on one account. The parent must already be bound.
+        let parent = match single_header(&headers, "x-codex-parent-thread-id")? {
+            Some(value) if existing.is_none() && account_pin.is_none() => {
+                let parent = ClientSessionId::new(format!("native-{value}"))
+                    .map_err(|_| Error::new(ErrorCode::InvalidInput, "Invalid parent thread"))?;
+                state
+                    .runtime
+                    .ledger()
+                    .session_binding(&principal, &parent)
+                    .await?
+                    .filter(|parent| {
+                        parent.closed_at.is_none() && parent.intent.product.protocol() == protocol
+                    })
+            }
+            _ => None,
+        };
         let binding = match existing {
             Some(binding) => binding,
             None => {
-                let (pool, product) = select_pool(
-                    &state,
-                    &principal,
-                    protocol,
-                    &model,
-                    pool_pin,
-                    account_pin.as_ref(),
-                )
-                .await?;
+                let (pool, product, account_pin) = match parent {
+                    Some(parent) => (
+                        parent.intent.pool,
+                        parent.intent.product,
+                        Some(parent.account),
+                    ),
+                    None => {
+                        let (pool, product) = select_pool(
+                            &state,
+                            &principal,
+                            protocol,
+                            &model,
+                            pool_pin,
+                            account_pin.as_ref(),
+                        )
+                        .await?;
+                        (pool, product, account_pin)
+                    }
+                };
                 state
                     .runtime
                     .ledger()
@@ -705,6 +843,7 @@ async fn unsupported(request: Request) -> Response {
 fn error_response(error: Error, protocol: Protocol) -> Response {
     let status = match error.code {
         ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+        ErrorCode::Forbidden => StatusCode::FORBIDDEN,
         ErrorCode::NotFound => StatusCode::NOT_FOUND,
         ErrorCode::InvalidInput => StatusCode::BAD_REQUEST,
         ErrorCode::SessionQuotaExhausted | ErrorCode::SessionConcurrencyExhausted => {

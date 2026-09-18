@@ -159,6 +159,7 @@ fn request(product: Product) -> UpstreamRequest {
         state: AttemptState::Dispatching,
         created_at: 0,
         updated_at: 0,
+        resolution: None,
     };
     let secret = if product == Product::CodexSubscription {
         r#"{"tokens":{"access_token":"synthetic-access","refresh_token":"synthetic-refresh","account_id":"synthetic-account"}}"#

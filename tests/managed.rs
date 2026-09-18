@@ -215,6 +215,7 @@ impl Fixture {
         Principal {
             id: PrincipalId::new("caller-a").unwrap(),
             pools: BTreeSet::from([PoolId::new("pool-a").unwrap()]),
+            admin: false,
         }
     }
     async fn binding(&self, session: &str, account: &str) -> Result<Binding> {
@@ -412,7 +413,8 @@ impl Transport for CountingTransport {
         Ok(UpstreamResponse {
             status: 200,
             headers: vec![],
-            stream: Box::pin(futures_util::stream::pending()),
+            // Ends without a terminal event, so a drained attempt settles uncertain.
+            stream: Box::pin(futures_util::stream::empty()),
         })
     }
 }

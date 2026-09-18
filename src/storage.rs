@@ -143,6 +143,17 @@ impl SqliteLedger {
     }
 }
 
+/// A binding the principal created, or any binding in an admin principal's pools.
+fn visible_binding(db: &Connection, principal: &Principal, id: &BindingId) -> Result<Binding> {
+    if !principal.admin {
+        return authorized_binding(db, principal, id);
+    }
+    let binding: Binding = get(db, "SELECT data FROM bindings WHERE id=?1", [id.as_str()])?
+        .filter(|binding: &Binding| principal.pools.contains(&binding.intent.pool))
+        .ok_or_else(|| Error::new(ErrorCode::NotFound, "binding not found"))?;
+    Ok(binding)
+}
+
 fn authorized_binding(db: &Connection, principal: &Principal, id: &BindingId) -> Result<Binding> {
     let binding: Binding = get(
         db,
@@ -732,7 +743,7 @@ impl Ledger for SqliteLedger {
                 id: AttemptId::new(Uuid::new_v4().to_string()).map_err(|_| unavailable())?,
                 binding: binding.id.clone(), quota_owner: account.quota_owner.clone(), operation: admission.operation,
                 request_fingerprint: admission.request_fingerprint, credential: account.credential.clone(),
-                state: AttemptState::Reserved, created_at: now, updated_at: now,
+                state: AttemptState::Reserved, created_at: now, updated_at: now, resolution: None,
             };
             tx.execute("INSERT INTO attempts(id,binding,owner,operation,state,data) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![attempt.id.as_str(), binding.id.as_str(), attempt.quota_owner.as_str(), attempt.operation.as_ref().map(OperationId::as_str), state_name(attempt.state), encode(&attempt)?]).map_err(|_| unavailable())?;
@@ -827,13 +838,138 @@ impl Ledger for SqliteLedger {
         let id = id.clone();
         self.run(move |db| {
             let attempt = load_attempt(db, &id)?;
-            authorized_binding(db, &principal, &attempt.binding).map_err(|error| {
+            visible_binding(db, &principal, &attempt.binding).map_err(|error| {
                 if error.code == ErrorCode::NotFound {
                     Error::new(ErrorCode::NotFound, "attempt not found")
                 } else {
                     error
                 }
             })?;
+            Ok(attempt)
+        })
+        .await
+    }
+
+    async fn attempts(
+        &self,
+        principal: &Principal,
+        state: Option<AttemptState>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Attempt>> {
+        let principal = principal.clone();
+        let limit = limit.clamp(1, 200);
+        self.run(move |db| {
+            let attempts: Vec<Attempt> = all(
+                db,
+                "SELECT a.data FROM attempts a JOIN bindings b ON a.binding=b.id \
+                 WHERE (?1 OR b.principal=?2) AND (?3 IS NULL OR a.state=?3) \
+                 ORDER BY a.id LIMIT ?4 OFFSET ?5",
+                params![
+                    principal.admin,
+                    principal.id.as_str(),
+                    state.map(state_name),
+                    limit,
+                    offset
+                ],
+            )?;
+            attempts
+                .into_iter()
+                .filter_map(
+                    |attempt| match visible_binding(db, &principal, &attempt.binding) {
+                        Ok(_) => Some(Ok(attempt)),
+                        Err(error) if error.code == ErrorCode::NotFound => None,
+                        Err(error) => Some(Err(error)),
+                    },
+                )
+                .collect()
+        })
+        .await
+    }
+
+    async fn bindings(
+        &self,
+        principal: &Principal,
+        open_only: bool,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Binding>> {
+        let principal = principal.clone();
+        let limit = limit.clamp(1, 200);
+        self.run(move |db| {
+            let bindings: Vec<Binding> = all(
+                db,
+                "SELECT data FROM bindings WHERE (?1 OR principal=?2) ORDER BY id LIMIT ?3 OFFSET ?4",
+                params![principal.admin, principal.id.as_str(), limit, offset],
+            )?;
+            Ok(bindings
+                .into_iter()
+                .filter(|binding| principal.pools.contains(&binding.intent.pool))
+                .filter(|binding| !open_only || binding.closed_at.is_none())
+                .collect())
+        })
+        .await
+    }
+
+    async fn resolve_attempt(
+        &self,
+        principal: &Principal,
+        id: &AttemptId,
+        outcome: Settlement,
+        rationale: String,
+        now: Timestamp,
+    ) -> Result<Attempt> {
+        timestamp(now)?;
+        if !principal.admin {
+            return Err(Error::new(
+                ErrorCode::Forbidden,
+                "resolving attempts requires an admin grant",
+            ));
+        }
+        if !matches!(outcome, Settlement::Succeeded | Settlement::Rejected) {
+            return Err(invalid("resolution outcome must be succeeded or rejected"));
+        }
+        let rationale = rationale.trim().to_owned();
+        if rationale.is_empty() || rationale.len() > 512 {
+            return Err(invalid(
+                "resolution rationale must contain 1..512 characters",
+            ));
+        }
+        let principal = principal.clone();
+        let id = id.clone();
+        self.run(move |db| {
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| unavailable())?;
+            let mut attempt = load_attempt(&tx, &id)?;
+            visible_binding(&tx, &principal, &attempt.binding).map_err(|error| {
+                if error.code == ErrorCode::NotFound {
+                    Error::new(ErrorCode::NotFound, "attempt not found")
+                } else {
+                    error
+                }
+            })?;
+            if attempt.state != AttemptState::Uncertain {
+                return Err(Error::new(
+                    ErrorCode::InvalidTransition,
+                    "only uncertain attempts can be resolved",
+                )
+                .bound(&attempt.binding)
+                .with_attempt(&attempt.id));
+            }
+            attempt.state = match outcome {
+                Settlement::Succeeded => AttemptState::Succeeded,
+                _ => AttemptState::Rejected,
+            };
+            attempt.updated_at = now.max(attempt.updated_at);
+            attempt.resolution = Some(AttemptResolution {
+                principal: principal.id.clone(),
+                outcome,
+                rationale,
+                resolved_at: now,
+            });
+            save_attempt(&tx, &attempt)?;
+            tx.commit().map_err(|_| unavailable())?;
             Ok(attempt)
         })
         .await

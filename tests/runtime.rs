@@ -76,6 +76,7 @@ async fn fixture() -> Fixture {
     let principal = Principal {
         id: PrincipalId::new("caller-a").unwrap(),
         pools: BTreeSet::from([pool.clone()]),
+        admin: false,
     };
     let binding = ledger
         .create_binding(
@@ -280,7 +281,7 @@ async fn partial_eof_fences_binding_and_retains_capacity_without_replay() {
 }
 
 #[tokio::test]
-async fn dropping_an_unpolled_response_still_fences_the_attempt() {
+async fn dropping_an_unpolled_response_drains_upstream_to_a_settled_outcome() {
     let f = fixture().await;
     let service = router(&f, Arc::new(SyntheticTransport::new()));
     let response = service
@@ -294,10 +295,11 @@ async fn dropping_an_unpolled_response_still_fences_the_attempt() {
         .await
         .unwrap();
     let id = response.attempt_id.clone();
+    // The client is gone, but the upstream terminal event still settles the attempt.
     drop(response);
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if f.ledger.attempt(&f.principal, &id).await.unwrap().state == AttemptState::Uncertain {
+            if f.ledger.attempt(&f.principal, &id).await.unwrap().state == AttemptState::Succeeded {
                 break;
             }
             tokio::task::yield_now().await;
@@ -305,6 +307,14 @@ async fn dropping_an_unpolled_response_still_fences_the_attempt() {
     })
     .await
     .unwrap();
+    assert_eq!(
+        f.ledger
+            .attempts(&f.principal, Some(AttemptState::Uncertain), 50, 0)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -437,7 +447,8 @@ async fn cancelled_http_future_does_not_orphan_admission_before_guard_creation()
                 .unwrap();
             assert_eq!(error.code, ErrorCode::OperationConflict);
             let id = error.attempt_id.unwrap();
-            if f.ledger.attempt(&f.principal, &id).await.unwrap().state == AttemptState::Uncertain {
+            // The undelivered response is drained to its upstream terminal event.
+            if f.ledger.attempt(&f.principal, &id).await.unwrap().state == AttemptState::Succeeded {
                 break;
             }
             tokio::task::yield_now().await;
