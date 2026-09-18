@@ -79,3 +79,8 @@ WebSockets/compaction, Kimi account-usage collection, broader provider conforman
 complete PAYG accounting, OIDC/workload identity lifecycle, reconciliation tooling,
 dashboard and deployment remain distinct gates. No existing consumer has changed.
 Module boundaries are recorded in [core implementation](design/core-implementation.md).
+
+A local [Messages-to-Responses experiment](docs/messages-to-responses.md) exercises
+Claude Code as a client of the bound Codex route. Bounded live tool execution and
+same-session resume passed through an existing daemon. Incremental translation,
+live reasoning replay and native daemon protocol support remain separate gates.

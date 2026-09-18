@@ -22,6 +22,7 @@ cargo build --workspace --locked
 python3 spikes/core/smoke.py
 python3 -m unittest discover -s spikes/codex -p 'test_*.py'
 python3 -m unittest discover -s spikes/messages -p 'test_*.py'
+python3 -m unittest discover -s spikes/messages_responses -p 'test_*.py'
 ```
 
 The smoke check starts its own daemon on loopback, generates a temporary caller
