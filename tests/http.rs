@@ -112,6 +112,10 @@ fn grants() -> BearerGrants {
             SecretValue::new("revoked-pool-token".into()),
             principal("caller-a", &["pool-b"]),
         ),
+        (
+            SecretValue::new("caller-ab-token".into()),
+            principal("caller-ab", &["pool-a", "pool-b"]),
+        ),
     ])
     .unwrap()
 }
@@ -693,4 +697,320 @@ async fn session_creation_reports_pool_exhaustion_with_exclusions() {
     assert_eq!(body["error"]["code"], "no_eligible_account");
     assert!(body["error"].get("exclusions").is_none());
     assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 0);
+}
+
+async fn drain(response: axum::response::Response) -> axum::http::HeaderMap {
+    let headers = response.headers().clone();
+    to_bytes(response.into_body(), 3 * 1024 * 1024)
+        .await
+        .unwrap();
+    headers
+}
+
+fn pool_request(
+    fixture: &Fixture,
+    path: &str,
+    token: &str,
+    headers: &[(&str, &str)],
+    body: Value,
+) -> Request<Body> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let _ = fixture;
+    request.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn drop_in_route_binds_native_threads_without_client_bookkeeping() {
+    let fixture = Fixture::new(Product::CodexSubscription, false).await;
+    let body =
+        json!({"model":"model-a", "stream":true, "input":"hello", "reasoning":{"effort":"low"}});
+    let thread = [("thread-id", "0192aaaa-1111-7bbb-8ccc-dddddddddddd")];
+
+    // First turn creates the binding; the response names the account and binding.
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(pool_request(
+            &fixture,
+            "/v1/responses",
+            "caller-a-token",
+            &thread,
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = drain(response).await;
+    assert_eq!(headers["x-poolparty-account"], "account-a");
+    let binding = headers["x-poolparty-binding"].to_str().unwrap().to_owned();
+    let record: Binding = serde_json::from_value(
+        value(
+            fixture
+                .request(
+                    "GET",
+                    &format!("/api/v1/sessions/{binding}"),
+                    Some("caller-a-token"),
+                    Value::Null,
+                )
+                .await,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(
+        record.intent.session.as_str(),
+        "native-0192aaaa-1111-7bbb-8ccc-dddddddddddd"
+    );
+    assert_eq!(record.intent.effort.as_deref(), Some("low"));
+    assert_eq!(record.intent.account, None);
+
+    // A resumed thread sends the same header and lands on the same binding.
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(pool_request(
+            &fixture,
+            "/v1/responses",
+            "caller-a-token",
+            &thread,
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        drain(response).await["x-poolparty-binding"],
+        binding.as_str()
+    );
+    assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 2);
+
+    // Changing the pinned intent on an existing thread is a conflict, never a move.
+    let mut changed = body.clone();
+    changed["reasoning"] = json!({"effort":"high"});
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(pool_request(
+            &fixture,
+            "/v1/responses",
+            "caller-a-token",
+            &thread,
+            changed,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let error = value(response).await;
+    assert_eq!(error["error"]["code"], "intent_conflict");
+    assert_eq!(error["error"]["binding_id"], binding.as_str());
+
+    // The session-id header is the fallback; a request with neither is rejected before dispatch.
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(pool_request(
+            &fixture,
+            "/v1/responses",
+            "caller-a-token",
+            &[("session-id", "conn-1")],
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_ne!(
+        drain(response).await["x-poolparty-binding"],
+        binding.as_str()
+    );
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(pool_request(
+            &fixture,
+            "/v1/responses",
+            "caller-a-token",
+            &[],
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(value(response).await["error"]["code"], "invalid_input");
+
+    // An account pin outside the grant and the wrong protocol surface never dispatch.
+    for (path, headers) in [
+        (
+            "/v1/responses",
+            vec![("thread-id", "t2"), ("x-poolparty-account", "account-z")],
+        ),
+        ("/v1/messages", vec![("thread-id", "t3")]),
+    ] {
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(pool_request(
+                &fixture,
+                path,
+                "caller-a-token",
+                &headers,
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            value(response).await["error"]["code"],
+            "no_eligible_account"
+        );
+    }
+    assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn drop_in_route_requires_an_explicit_pool_when_several_qualify() {
+    let fixture = Fixture::new(Product::CodexSubscription, false).await;
+    let owner = QuotaOwnerId::new("quota-b").unwrap();
+    fixture
+        .ledger
+        .put_quota_policy(QuotaPolicy {
+            owner: owner.clone(),
+            max_concurrency: 1,
+            unknown: UnknownCapacityPolicy::Reject,
+        })
+        .await
+        .unwrap();
+    fixture
+        .ledger
+        .put_account(Account {
+            id: AccountId::new("account-b").unwrap(),
+            product: Product::CodexSubscription,
+            quota_owner: owner.clone(),
+            pools: BTreeSet::from([PoolId::new("pool-b").unwrap()]),
+            credential: CredentialRef {
+                id: CredentialId::new("key-b").unwrap(),
+                generation: 1,
+            },
+            models: BTreeSet::from(["model-a".into()]),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    fixture
+        .ledger
+        .observe(UsageObservation {
+            owner,
+            observed_at: 1,
+            valid_until: 1000,
+            status: CapacityStatus::Available,
+            windows: vec![],
+            balances: vec![],
+            source: "synthetic".into(),
+            provider_available: None,
+        })
+        .await
+        .unwrap();
+    let body = json!({"model":"model-a", "stream":true, "input":"hello"});
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(pool_request(
+            &fixture,
+            "/v1/responses",
+            "caller-ab-token",
+            &[("thread-id", "t-ambiguous")],
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(value(response).await["error"]["code"], "invalid_input");
+    for (pool, account) in [("pool-b", "account-b"), ("pool-a", "account-a")] {
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(pool_request(
+                &fixture,
+                "/v1/responses",
+                "caller-ab-token",
+                &[
+                    ("thread-id", &format!("t-{pool}")),
+                    ("x-poolparty-pool", pool),
+                ],
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(drain(response).await["x-poolparty-account"], account);
+    }
+    // A single-pool grant needs no pin even though the inventory has two pools.
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(pool_request(
+            &fixture,
+            "/v1/responses",
+            "caller-a-token",
+            &[("thread-id", "t-single")],
+            body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(drain(response).await["x-poolparty-account"], "account-a");
+}
+
+#[tokio::test]
+async fn drop_in_messages_route_derives_the_session_from_metadata() {
+    let fixture = Fixture::new(Product::GlmCoding, false).await;
+    let body = json!({
+        "model":"model-a", "stream":true, "messages":[],
+        "metadata":{"user_id":"user_abc_account_def_session_0192bbbb-2222-7ccc-8ddd-eeeeeeeeeeee"}
+    });
+    let mut bindings = BTreeSet::new();
+    for _ in 0..2 {
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(pool_request(
+                &fixture,
+                "/v1/messages",
+                "caller-a-token",
+                &[],
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = drain(response).await;
+        assert_eq!(headers["x-poolparty-account"], "account-a");
+        bindings.insert(headers["x-poolparty-binding"].to_str().unwrap().to_owned());
+    }
+    assert_eq!(bindings.len(), 1);
+    let record: Binding = serde_json::from_value(
+        value(
+            fixture
+                .request(
+                    "GET",
+                    &format!("/api/v1/sessions/{}", bindings.iter().next().unwrap()),
+                    Some("caller-a-token"),
+                    Value::Null,
+                )
+                .await,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(
+        record.intent.session.as_str(),
+        "native-0192bbbb-2222-7ccc-8ddd-eeeeeeeeeeee"
+    );
+    assert_eq!(fixture.transport.calls.load(Ordering::SeqCst), 2);
 }

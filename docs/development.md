@@ -63,6 +63,23 @@ operation never dispatches again; its error identifies the existing attempt for
 `GET /api/v1/attempts/{id}`. Session creation and inference have separate identity.
 Resume uses `GET /api/v1/sessions/{id}` and the same bound route.
 
+### Drop-in surface
+
+Native clients need one static base URL and a caller grant, nothing else:
+`POST /v1/responses` for Codex and `POST /v1/messages` for Messages clients.
+The router derives the session from the client's own thread identity: the
+`thread-id` header, then the `session-id` header, then for Messages the
+`metadata.user_id` field (its trailing `session_<id>` segment when present).
+The first request on a thread creates the binding from the request body and the
+caller's authorized pools; every later request on that thread, including a
+resumed one, lands on the same binding and account. A different model or effort
+on an existing thread is `intent_conflict`, never a silent move. Successful and
+failed responses after binding carry `x-poolparty-binding` and
+`x-poolparty-account` headers. When several authorized pools serve the model,
+the caller sets `x-poolparty-pool`; `x-poolparty-account` pins one account.
+Requests without any session identity are rejected before dispatch. The
+explicit session API below remains for callers that choose or inspect bindings.
+
 Session creation selects the first eligible account in the pool by account ID,
 or the pinned `account` alone. When nothing is eligible, the error carries an
 `exclusions` array with each pool member's `account`, `code` and `message`. A

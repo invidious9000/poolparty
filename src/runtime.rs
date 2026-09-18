@@ -278,7 +278,8 @@ fn uncertain_error(error: Error, binding: &BindingId) -> Error {
     error
 }
 
-fn validate_body(protocol: Protocol, body: &[u8]) -> Result<(String, Option<String>)> {
+/// Extract the bounded model and effort intent from a native request body.
+pub fn validate_body(protocol: Protocol, body: &[u8]) -> Result<(String, Option<String>)> {
     if body.len() > 2 * 1024 * 1024 {
         return Err(Error::new(
             ErrorCode::InvalidInput,

@@ -14,7 +14,12 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::{domain::*, ports::SecretValue, readiness::Readiness, runtime::Router};
+use crate::{
+    domain::*,
+    ports::SecretValue,
+    readiness::Readiness,
+    runtime::{RoutedResponse, Router, validate_body},
+};
 
 const BODY_LIMIT: usize = 2 * 1024 * 1024;
 
@@ -91,6 +96,8 @@ pub fn app(runtime: Arc<Router>, grants: BearerGrants) -> HttpRouter {
         .route("/api/v1/sessions/{id}", get(inspect_binding))
         .route("/api/v1/sessions/{id}/close", post(close_binding))
         .route("/api/v1/attempts/{id}", get(inspect_attempt))
+        .route("/v1/messages", any(pool_messages))
+        .route("/v1/responses", any(pool_responses))
         .route("/routes/{id}/v1/messages", any(messages))
         .route("/routes/{id}/codex/responses", any(responses))
         .route(
@@ -322,6 +329,207 @@ async fn responses(
     route_model(state, principal, id, Protocol::Responses, request).await
 }
 
+async fn pool_messages(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<Principal>,
+    request: Request,
+) -> Response {
+    pool_model(state, principal, Protocol::Messages, request).await
+}
+async fn pool_responses(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<Principal>,
+    request: Request,
+) -> Response {
+    pool_model(state, principal, Protocol::Responses, request).await
+}
+
+/// The drop-in surface: one static base URL per protocol. The native client's
+/// own thread identity selects the session, so a resumed thread lands on the
+/// binding and account it started on without any client-side bookkeeping. The
+/// first request on a thread creates the binding from the request body and the
+/// caller's authorized pools; explicit `/api/v1/sessions` remains available for
+/// callers that want to choose or inspect a binding themselves.
+async fn pool_model(
+    state: Arc<AppState>,
+    principal: Principal,
+    protocol: Protocol,
+    request: Request,
+) -> Response {
+    let mut resolved: Option<Binding> = None;
+    let result = async {
+        if request.method() != Method::POST || request.headers().contains_key(header::UPGRADE) {
+            return Err(Error::new(
+                ErrorCode::Unsupported,
+                "Only HTTP POST streaming is supported",
+            ));
+        }
+        let headers = request.headers().clone();
+        let operation = parse_operation(&headers)?;
+        let pool_pin = single_header(&headers, "x-poolparty-pool")?
+            .map(|value| {
+                PoolId::new(value).map_err(|_| Error::new(ErrorCode::InvalidInput, "Invalid pool"))
+            })
+            .transpose()?;
+        let account_pin = single_header(&headers, "x-poolparty-account")?
+            .map(|value| {
+                AccountId::new(value)
+                    .map_err(|_| Error::new(ErrorCode::InvalidInput, "Invalid account"))
+            })
+            .transpose()?;
+        let bytes = to_bytes(request.into_body(), BODY_LIMIT)
+            .await
+            .map_err(|_| {
+                Error::new(
+                    ErrorCode::InvalidInput,
+                    "Request body could not be read within the 2 MiB limit",
+                )
+            })?;
+        let (model, effort) = validate_body(protocol, &bytes)?;
+        let session = native_session(&headers, protocol, &bytes)?;
+        let (pool, product) = select_pool(
+            &state,
+            &principal,
+            protocol,
+            &model,
+            pool_pin,
+            account_pin.as_ref(),
+        )
+        .await?;
+        let binding = state
+            .runtime
+            .ledger()
+            .create_binding(
+                &principal,
+                CreateBinding {
+                    session,
+                    pool,
+                    product,
+                    model,
+                    account: account_pin,
+                    effort,
+                },
+                state.runtime.now(),
+            )
+            .await?;
+        let id = binding.id.clone();
+        resolved = Some(binding);
+        state
+            .runtime
+            .execute(&principal, id, operation, protocol, bytes)
+            .await
+    }
+    .await;
+    let error_binding = resolved.as_ref().map(|binding| binding.id.clone());
+    let mut response = routed_response(result, protocol, error_binding);
+    if let Some(binding) = resolved {
+        for (name, value) in [
+            ("x-poolparty-binding", binding.id.as_str()),
+            ("x-poolparty-account", binding.account.as_str()),
+        ] {
+            if let Ok(value) = HeaderValue::from_str(value) {
+                response.headers_mut().insert(name, value);
+            }
+        }
+    }
+    response
+}
+
+/// Session identity for the drop-in surface, in order: the native client's
+/// `thread-id` header, its `session-id` header, then for Messages the
+/// `metadata.user_id` field (its trailing `session_<id>` segment when present).
+fn native_session(headers: &HeaderMap, protocol: Protocol, body: &[u8]) -> Result<ClientSessionId> {
+    let invalid = || {
+        Error::new(
+            ErrorCode::InvalidInput,
+            "Session identity must be 1..128 ASCII letters, digits, dash, underscore or dot",
+        )
+    };
+    for name in ["thread-id", "session-id"] {
+        if let Some(value) = single_header(headers, name)? {
+            return ClientSessionId::new(format!("native-{value}")).map_err(|_| invalid());
+        }
+    }
+    if protocol == Protocol::Messages {
+        let user = serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("metadata")?
+                    .get("user_id")?
+                    .as_str()
+                    .map(str::to_owned)
+            });
+        if let Some(user) = user {
+            let session = user
+                .rsplit_once("_session_")
+                .map_or(user.as_str(), |(_, tail)| tail);
+            return ClientSessionId::new(format!("native-{session}")).map_err(|_| invalid());
+        }
+    }
+    Err(Error::new(
+        ErrorCode::InvalidInput,
+        "A thread-id or session-id header (or Messages metadata.user_id) identifies the session",
+    ))
+}
+
+/// Resolve the single pool and product that can serve this model within the
+/// caller's grant. Ambiguity is an explicit caller decision, never a guess.
+async fn select_pool(
+    state: &AppState,
+    principal: &Principal,
+    protocol: Protocol,
+    model: &str,
+    pool_pin: Option<PoolId>,
+    account_pin: Option<&AccountId>,
+) -> Result<(PoolId, Product)> {
+    let accounts = state.runtime.ledger().accounts(principal).await?;
+    let mut choices: BTreeSet<(PoolId, Product)> = BTreeSet::new();
+    for account in accounts {
+        if !account.enabled
+            || account.product.protocol() != protocol
+            || !account.models.contains(model)
+            || account_pin.is_some_and(|pin| pin != &account.id)
+        {
+            continue;
+        }
+        for pool in account.pools {
+            if pool_pin.as_ref().is_none_or(|pin| pin == &pool) {
+                choices.insert((pool, account.product));
+            }
+        }
+    }
+    let mut choices = choices.into_iter();
+    match (choices.next(), choices.next()) {
+        (Some(choice), None) => Ok(choice),
+        (None, _) => Err(Error::new(
+            ErrorCode::NoEligibleAccount,
+            "No authorized pool serves this model",
+        )),
+        (Some(_), Some(_)) => Err(Error::new(
+            ErrorCode::InvalidInput,
+            "Several authorized pools serve this model; set x-poolparty-pool",
+        )),
+    }
+}
+
+fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(Error::new(
+            ErrorCode::InvalidInput,
+            format!("Duplicate {name} header"),
+        ));
+    }
+    value
+        .to_str()
+        .map(Some)
+        .map_err(|_| Error::new(ErrorCode::InvalidInput, format!("Invalid {name} header")))
+}
+
 async fn route_model(
     state: Arc<AppState>,
     principal: Principal,
@@ -357,6 +565,14 @@ async fn route_model(
             .await
     }
     .await;
+    routed_response(result, protocol, error_binding)
+}
+
+fn routed_response(
+    result: Result<RoutedResponse>,
+    protocol: Protocol,
+    error_binding: Option<BindingId>,
+) -> Response {
     match result {
         Err(error) => error_response(error, protocol),
         Ok(routed) => {

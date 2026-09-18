@@ -159,7 +159,8 @@ it does not certify a future write against disk exhaustion. Account eligibility
 is established by admission and usage observations.
 Exhaustion, credential faults and uncertain attempts preserve the binding; the
 caller chooses whether to wait or create a new logical session. A rejected
-session creation explains each pool member's exclusion; see
+session creation explains each pool member's exclusion, and native clients can
+use the static drop-in surface instead of explicit sessions; see
 [the development notes](development.md#run-the-demo).
 
 ## Maintenance and shutdown

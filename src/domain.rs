@@ -58,7 +58,7 @@ id!(OperationId);
 /// Unix milliseconds, supplied by the application clock rather than hidden in storage.
 pub type Timestamp = i64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Product {
     CodexSubscription,

@@ -59,8 +59,26 @@ still authorize that binding after the restart.
 
 ## Native provider configuration
 
-The fixture writes a protected configuration inside its own `CODEX_HOME` using
-the bound Responses base URL and an environment-based caller grant:
+For ordinary use, point Codex at the drop-in surface with a static base URL and
+an environment-based caller grant. The router binds each native thread on its
+first request and keeps it on that account across resumes; see
+[the development notes](development.md#drop-in-surface).
+
+```toml
+[model_providers.poolparty]
+name = "Poolparty"
+base_url = "https://router.example.com/v1"
+env_key = "POOLPARTY_GRANT"
+requires_openai_auth = false
+wire_api = "responses"
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
+```
+
+The fixture below instead pins an explicit binding so restart and rotation
+checks compare one known binding record. It writes a protected configuration
+inside its own `CODEX_HOME` using the bound Responses base URL:
 
 ```toml
 model = "example-model"
